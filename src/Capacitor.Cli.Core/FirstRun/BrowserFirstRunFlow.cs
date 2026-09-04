@@ -127,13 +127,37 @@ public sealed class BrowserFirstRunFlow(
         // either a leg still waiting or a settled one, never a half-decided state.
         FirstRunFlowResult? settled = null;
 
+        // Says this machine is still here on its own timer, so a death that sends nothing — a kill, a
+        // lost network, a shut lid — is still something the browser can see.
+        using var beat = FirstRunHeartbeat.Start(channel, serverUrl, flowId, _clock);
+
+        // Stopped from BOTH interrupt callbacks, which is what makes the ordering hold on that path:
+        // Environment.Exit runs no `using` at all, so a beat scheduled by the timer could otherwise post
+        // inside the notice's own budget and say this machine is here, moments after it said it had gone.
+        //
+        // The send alone is not enough — a notice with nothing to say never invokes it, and a leg that
+        // settled Finished or Expired has nothing to say — so the reason callback stops it too. That one
+        // is evaluated on every interrupt whatever the reason turns out to be, which is what makes it the
+        // place a beat can be stopped from unconditionally.
         using var notice = _interrupts.Arm(
-            (reason, token) => RelinquishAsync(serverUrl, flowId, reason, token),
-            interruptReason: () => InterruptReason(Volatile.Read(ref settled)));
+            (reason, token) => {
+                beat.Dispose();
+
+                return RelinquishAsync(serverUrl, flowId, reason, token);
+            },
+            interruptReason: () => {
+                beat.Dispose();
+
+                return InterruptReason(Volatile.Read(ref settled));
+            });
 
         try {
             Volatile.Write(ref settled, await PollAsync(serverUrl, flowId, report, ct));
         } finally {
+            // Covers every ending that reaches it, including the ones with nothing to relinquish, so the
+            // timer is not left scheduling through the notice budget and the telemetry flush after it.
+            beat.Dispose();
+
             progress.WaitEnded();
         }
 

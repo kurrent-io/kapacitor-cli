@@ -35,6 +35,16 @@ public sealed record FirstRunRelinquishOutcome(int StatusCode) {
     public bool Recorded => StatusCode is >= 200 and < 300;
 }
 
+/// <summary>One beat. Never retried, and success is not inspected: the next beat is already due, and a
+/// run of them failing is precisely what the browser is meant to notice.
+///
+/// <para><paramref name="RetryAfter"/> is the exception, populated only on a 429 and only when the server
+/// sent one. A throttle is an instruction rather than a failure, and beating through it would spend a
+/// tenant's budget on liveness and leave the poll — the interactive half — in penalty.</para></summary>
+public sealed record FirstRunHeartbeatOutcome(int StatusCode, TimeSpan? RetryAfter = null) {
+    public bool Recorded => StatusCode is >= 200 and < 300;
+}
+
 /// <summary>The flow routes, as a seam: the loop, the backoff and the guards around them are the
 /// part worth testing, and they should not need a socket to exercise.</summary>
 public interface IFirstRunFlowChannel {
@@ -65,6 +75,10 @@ public interface IFirstRunFlowChannel {
     /// will act on. Best effort by design: it is the last thing the leg does.</summary>
     Task<FirstRunRelinquishOutcome> RelinquishAsync(
         string serverUrl, string flowId, string reason, CancellationToken ct);
+
+    /// <summary>Says this machine is still here. Sent on its own timer rather than from the poll, which
+    /// stops for the whole of an import — see <see cref="FirstRunHeartbeat"/>.</summary>
+    Task<FirstRunHeartbeatOutcome> HeartbeatAsync(string serverUrl, string flowId, CancellationToken ct);
 }
 
 /// <summary>
@@ -204,6 +218,24 @@ public sealed class FirstRunFlowClient(HttpClient http) : IFirstRunFlowChannel {
             using var resp = await http.SendAsync(req, ct);
 
             return new((int)resp.StatusCode);
+        } catch (Exception e) when (IsTransient(e, ct)) {
+            return new(0);
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<FirstRunHeartbeatOutcome> HeartbeatAsync(
+            string serverUrl, string flowId, CancellationToken ct) {
+        try {
+            using var req = new HttpRequestMessage(
+                HttpMethod.Post,
+                $"{Base(serverUrl)}/api/first-run/flows/{Uri.EscapeDataString(flowId)}/heartbeat");
+
+            using var resp = await http.SendAsync(req, ct);
+
+            var status = (int)resp.StatusCode;
+
+            return new(status, status is 429 ? RetryAfter(resp) : null);
         } catch (Exception e) when (IsTransient(e, ct)) {
             return new(0);
         }

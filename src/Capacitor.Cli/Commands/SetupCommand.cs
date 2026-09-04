@@ -908,6 +908,11 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
 
                 using var deferred = deferredHttp;
 
+                // The beat holds its lane until a request finishes, so this client's timeout is how long a
+                // wedged connection can silence liveness. Left unset it is the 100s default; matched to the
+                // browser leg's so both halves of the flow answer for silence on the same scale.
+                deferred.Timeout = BrowserFlowHttpTimeout;
+
                 // The status is the point of the factory: it hands back a client either way, and an
                 // expired or missing token leaves one that cannot poll. Checked rather than assumed, or
                 // the silent path is exactly the one above with a better-looking constructor.
@@ -915,9 +920,20 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
                 // NoAuthRequired runs it. That status means the client is usable as it stands, so
                 // skipping on it would leave the request outstanding on a server that would have
                 // answered — the browser leg skips there only because it has nothing left to do.
-                if (deferredAuth is AuthStatus.Ok or AuthStatus.NoAuthRequired)
+                if (deferredAuth is AuthStatus.Ok or AuthStatus.NoAuthRequired) {
+                    var channel = new FirstRunFlowClient(deferred);
+
+                    // The browser is holding the request this leg is about to perform, and enabling a
+                    // service can outlast any staleness window — so the beat has to span it. Only for a
+                    // flow that finished: every other ending already relinquished, and beating again
+                    // would take that back.
+                    using var beat = browserAnswers.FlowStillLive
+                        ? FirstRunHeartbeat.Start(channel, serverUrl, browserFlowId, TimeProvider.System)
+                        : null;
+
                     await SetupDaemonService.RunAsync(
-                        new FirstRunFlowClient(deferred), serverUrl, browserFlowId, config, saved, home);
+                        channel, serverUrl, browserFlowId, config, saved, home);
+                }
                 else
                     AnsiConsole.MarkupLine(
                         "  [dim]Did not finish the daemon service request: the stored token is not usable. "
@@ -1530,7 +1546,8 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
             FirstRunFlowOutcomes.Agents(result),
             FirstRunFlowOutcomes.Import(result),
             importing?.Failed == true,
-            FlowId(result));
+            FlowId(result),
+            result is FirstRunFlowResult.Finished);
     }
 
     /// <summary>
@@ -1542,11 +1559,16 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
     /// backfill that did not happen.</param>
     /// <param name="FlowId">The flow this leg ran, or null where none did. What the steps below need to
     /// finish a capability the browser asked for and this leg deliberately did not perform.</param>
+    /// <param name="FlowStillLive">Whether the browser is still waiting on this machine. True only for a
+    /// leg that finished: every other ending relinquished, and a relinquish is the machine stating it has
+    /// gone. Read before beating again — saying this machine is here, after saying it had gone, is worse
+    /// than the silence it would be covering.</param>
     internal sealed record BrowserFlowAnswers(
             FirstRunAgentsAnswer? Agents,
             FirstRunImportAnswer? Import,
-            bool                  ImportFailed = false,
-            string?               FlowId       = null) {
+            bool                  ImportFailed  = false,
+            string?               FlowId        = null,
+            bool                  FlowStillLive = false) {
         /// <summary>No browser leg ran, or it ended with nothing to spend.</summary>
         public static BrowserFlowAnswers None { get; } = new(null, null);
     }

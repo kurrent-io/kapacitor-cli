@@ -711,3 +711,46 @@ client by lease so overlapping reads never see it disposed, retires it on sign-o
 with the launch client through a holder that memoizes the cleanup, so both teardown paths reach it
 and nothing is disposed twice. The window gains a minimum width equal to its default: 310 of rail plus
 400 of pane must never squeeze the terminal column to nothing.
+
+## The machine beats, so a death that cannot speak is still visible
+
+The browser is told the machine has stopped by a relinquish the leg sends on its way out. That covers
+every exit it can reach, including through `Environment.Exit` once the notice is also sent from
+`AppDomain.ProcessExit` — but it is a statement, so anything that stops the process making statements
+sends nothing at all: a kill, a lost network, a shut lid. The flow's own lifetime was the only backstop,
+and it is twelve hours.
+
+A beat on its own timer turns that silence into something the server can observe.
+
+**It is not driven by the poll, and that is the whole design.** The import runs inline in the poll loop
+and stops polling for its duration, so liveness derived from the poll would declare the machine gone
+during the one stretch it is working hardest. A separate timer measures the process, which is the only
+thing a beat can honestly claim — a wedged leg goes on beating, and nothing here should ever be read as
+progress.
+
+**Nothing inspects the result for success.** A beat is a network call on a machine whose network may be
+exactly what is failing, so a failure is not handled and a throw does not end the loop: a run of them is
+the signal, and only the server is positioned to read it. Two statuses are read, because neither is
+discoverable by a later beat — a throttle, which is an instruction and would otherwise spend the budget
+the poll needs, and an absent route, which answers the same way for the whole leg.
+
+**A beat is never cancelled.** The beat rides the setup client, whose 401 handler rotates a single-use
+refresh token and then persists it, the rotation itself being uncancellable. A cancel landing between the
+two spends the credential server-side and never writes the replacement, logging the user out mid-setup.
+So the stop token is kept off the request entirely: what ends a beat is the client's own timeout, and what
+ends the loop is the token one level up.
+
+**Answers are carried across ticks rather than abandoned, and beats are capped rather than serialised.**
+A dropped verdict is never read, and a throttling or absent-route server is exactly the one whose answer
+outruns an interval — so the two statuses worth reading would be missed precisely when they matter. But
+allowing only one at a time makes a single slow request the whole liveness budget, so the bound is a
+count: enough that a slow answer cannot silence the machine, few enough that a wedged network cannot
+accumulate one open POST per interval on the very machine whose network is failing.
+
+**Backing off a missing route is a pause, not an ending.** A rolling deploy or a proxy reload is minutes
+long and the poll on the same client rides straight through it, so a beat that stopped for good would have
+the browser infer a death from a machine still demonstrably talking to it.
+
+**Stopping does not wait for a beat in flight**, and does not cancel it either. Nothing is owed to it:
+the relinquish that follows states the ending, and the browser reads a stated ending ahead of an inferred
+one.

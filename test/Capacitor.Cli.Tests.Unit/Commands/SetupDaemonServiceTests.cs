@@ -43,6 +43,7 @@ public class SetupDaemonServiceTests {
         public Task<FirstRunImportReportOutcome> ReportImportAsync(string s, string f, ReportFirstRunImportRequest r, CancellationToken ct) => throw new NotSupportedException();
         public Task<FirstRunImportReportOutcome> ReportImportOutcomeAsync(string s, string f, ReportFirstRunImportOutcomeRequest r, CancellationToken ct) => throw new NotSupportedException();
         public Task<FirstRunRelinquishOutcome> RelinquishAsync(string s, string f, string reason, CancellationToken ct) => throw new NotSupportedException();
+        public Task<FirstRunHeartbeatOutcome> HeartbeatAsync(string s, string f, CancellationToken ct) => throw new NotSupportedException();
     }
 
     static FirstRunFlowResponse View(params string[] outstanding) =>

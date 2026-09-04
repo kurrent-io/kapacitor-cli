@@ -141,6 +141,20 @@ public class BrowserFirstRunFlowTests {
             return Task.FromResult(new FirstRunRelinquishOutcome(
                 RelinquishStatuses.Count > 0 ? RelinquishStatuses.Dequeue() : 200));
         }
+
+        /// <summary>Counted rather than logged: the beat runs on its own task off the fake clock, so
+        /// putting it in the shared log would interleave it into every ordering assertion in this class
+        /// at a point no test chose.</summary>
+        public int Beats => Volatile.Read(ref _beats);
+
+        int _beats;
+
+        public Task<FirstRunHeartbeatOutcome> HeartbeatAsync(
+                string serverUrl, string flowId, CancellationToken ct) {
+            Interlocked.Increment(ref _beats);
+
+            return Task.FromResult(new FirstRunHeartbeatOutcome(200));
+        }
     }
 
     /// <summary>
@@ -258,18 +272,25 @@ public class BrowserFirstRunFlowTests {
         /// only moves from outside, so a lane that should look slow has to move it itself.</summary>
         public Action? Advance { get; set; }
 
+        /// <summary>Awaited at the start of each half, for a lane that has to PARK rather than jump the
+        /// clock — the poll loop is then genuinely suspended inside it, and Drive goes on pumping.
+        /// Separate from <see cref="Advance"/> because blocking the loop's thread instead would starve
+        /// the very continuation such a test is waiting on.</summary>
+        public Func<Task>? Waits { get; set; }
+
         public List<DateTimeOffset> ScanStamps { get; } = [];
 
-        public Task<ReportFirstRunImportRequest?> DiscoverAsync(
+        public async Task<ReportFirstRunImportRequest?> DiscoverAsync(
                 IReadOnlyList<HarnessId>? vendors, DateTimeOffset asOf, CancellationToken ct) {
             log.Add("scan");
             ScanStamps.Add(asOf);
             Advance?.Invoke();
             Scans.Add(vendors);
 
+            if (Waits is { } wait) await wait();
             if (ScanThrows is { } boom) throw boom;
 
-            return Task.FromResult(Found);
+            return Found;
         }
 
         public List<DateOnly> Dates { get; } = [];
@@ -278,16 +299,17 @@ public class BrowserFirstRunFlowTests {
         /// unaccounted rather than zero.</summary>
         public FirstRunImportTotals? Moved { get; set; } = new(3, 1, 0);
 
-        public Task<FirstRunImportTotals?> ImportAsync(
+        public async Task<FirstRunImportTotals?> ImportAsync(
                 FirstRunImportAnswer answer, DateOnly today, CancellationToken ct) {
             log.Add("import");
             Advance?.Invoke();
             Imports.Add(answer);
             Dates.Add(today);
 
+            if (Waits is { } wait) await wait();
             if (ImportThrows is { } boom) throw boom;
 
-            return Task.FromResult(Moved);
+            return Moved;
         }
 
         public static ReportFirstRunImportRequest Report(int sessions = 12) => new() {
@@ -1800,6 +1822,47 @@ public class BrowserFirstRunFlowTests {
 
         await Assert.That(result).IsTypeOf<FirstRunFlowResult.Finished>();
     }
+
+    // ---- saying the machine is still here ----
+
+    /// <summary>
+    /// Why the beat is not driven by the poll. The import blocks the loop for its whole duration —
+    /// deliberately, because two live renderables cannot share a terminal — and the loop credits that
+    /// time back to its own deadline, so liveness read from polling would call the machine gone during
+    /// the one stretch it is working hardest.
+    ///
+    /// <para>The lane parks in an <c>await</c> rather than blocking a thread, which is what makes this
+    /// deterministic: <c>Drive</c> goes on advancing the fake clock while the poll loop sits inside the
+    /// lane, so the beat's timer fires from the test's own pumping rather than from wall time.</para>
+    /// </summary>
+    [Test]
+    public async Task The_beat_goes_on_while_the_import_holds_the_poll() {
+        var h = Build(importing: true);
+        h.Channel.Polls.Enqueue(new(200, ImportAnswered()));
+        h.Channel.Polls.Enqueue(new(200, Done()));
+
+        var before = 0;
+        var during = 0;
+
+        // Runs with the poll loop parked inside the lane, which is the only moment this claim is about.
+        h.Importing!.Waits = async () => {
+            before = h.Channel.Beats;
+
+            // Bounded so a beat that never comes fails the assertion below instead of hanging.
+            for (var i = 0; i < YieldBudget && h.Channel.Beats <= before; i++) await Task.Yield();
+
+            during = h.Channel.Beats;
+        };
+
+        await Run(h);
+
+        await Assert.That(during).IsGreaterThan(before)
+                    .Because("the machine fell silent for the whole import, which is what a death looks like");
+    }
+
+    /// <summary>Generous: it is only ever exhausted by a beat that is not coming, and each yield is a
+    /// scheduler turn rather than a wait.</summary>
+    const int YieldBudget = 200_000;
 
     // ---- saying the machine has gone ----
 
