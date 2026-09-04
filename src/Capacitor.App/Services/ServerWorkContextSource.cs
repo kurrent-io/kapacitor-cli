@@ -53,7 +53,9 @@ public sealed class ServerWorkContextSource : IWorkContextSource, IAsyncDisposab
             .AddCapacitorHttp()
             .BuildServiceProvider();
 
-        var attempt = await _lane.GetRequiredService<ICapacitorHttpClient>().ForHookAsync(ct).ConfigureAwait(false);
+        // The waiting lane, not the hook one: this client is leased for as long as the pane is open,
+        // so it has to outlive a token that expires under it. The status is what retires the lease.
+        var attempt = await _lane.GetRequiredService<ICapacitorHttpClient>().ForWaitAsync(ct).ConfigureAwait(false);
 
         return (attempt.Client, attempt.Status);
     }

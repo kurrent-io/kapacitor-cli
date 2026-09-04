@@ -589,6 +589,77 @@ public class CapacitorHttpContainerTests : IDisposable {
     }
 
     /// <summary>
+    /// A session client is built once and held for the process's life, so its handler — and the
+    /// credential it resolved — outlive any login that lands afterwards. A first send made before
+    /// there was anything to send must not fix that absence in place: the MCP servers reach this
+    /// exact state whenever an agent starts them before the user has logged in.
+    /// </summary>
+    [Test]
+    public async Task A_login_after_a_held_client_went_out_anonymous_reaches_its_next_send() {
+        StubProvider(AuthProvider.GitHubApp);
+
+        _server.Given(Request.Create().WithPath("/api/me").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(401));
+        _server.Given(Request.Create().WithPath("/api/me").UsingGet()
+                    .WithHeader("Authorization", "Bearer tok_after_login"))
+            .RespondWith(Response.Create().WithStatusCode(200));
+
+        using var sp     = Container();
+        using var client = await sp.GetRequiredService<ICapacitorHttpClient>().ForSessionAsync();
+
+        using (var refused = await client.GetAsync($"{Url}/api/me")) {
+            await Assert.That(refused.StatusCode).IsEqualTo(HttpStatusCode.Unauthorized)
+                .Because("nothing is stored yet, so the send goes out with no bearer");
+        }
+
+        await SeedTokenAsync("tok_after_login");
+
+        using var accepted = await client.GetAsync($"{Url}/api/me");
+
+        await Assert.That(accepted.StatusCode).IsEqualTo(HttpStatusCode.OK);
+
+        var sent = _server.LogEntries.Where(e => e.RequestMessage.Path == "/api/me").ToList();
+
+        await Assert.That(sent[0].RequestMessage.Headers!.ContainsKey("Authorization")).IsFalse();
+        await Assert.That(sent[^1].RequestMessage.Headers!["Authorization"].Single())
+            .IsEqualTo("Bearer tok_after_login");
+    }
+
+    /// <summary>
+    /// The waiting verb reports the status like a hook's does, but recovers like a command: its
+    /// caller blocks on a human in a browser, which outlasts a short-lived token, so ending the wait
+    /// on the first 401 would discard a leg that was still answerable.
+    /// </summary>
+    [Test]
+    public async Task The_waiting_lane_reports_its_status_and_still_recovers_a_401() {
+        await AuthenticateAsync("tok_1");
+
+        _server.Given(Request.Create().WithPath("/auth/refresh").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(200)
+                .WithHeader("Content-Type", "application/json")
+                .WithBody("""{"access_token":"tok_2","expires_in":3600}"""));
+
+        _server.Given(Request.Create().WithPath("/api/flow").UsingGet()
+                    .WithHeader("Authorization", "Bearer tok_1"))
+            .RespondWith(Response.Create().WithStatusCode(401));
+        _server.Given(Request.Create().WithPath("/api/flow").UsingGet()
+                    .WithHeader("Authorization", "Bearer tok_2"))
+            .RespondWith(Response.Create().WithStatusCode(200));
+
+        using var sp = Container();
+
+        var (client, status, _, _) = await sp.GetRequiredService<ICapacitorHttpClient>().ForWaitAsync();
+
+        using var waiting  = client;
+        using var response = await waiting.GetAsync($"{Url}/api/flow");
+
+        await Assert.That(status).IsEqualTo(AuthStatus.Ok)
+            .Because("the caller gates on the status before it starts waiting");
+        await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That(_server.LogEntries.Count(e => e.RequestMessage.Path == "/api/flow")).IsEqualTo(2);
+    }
+
+    /// <summary>
     /// Handler order, which nothing but a live 401-then-200 exchange can pin. Recovery is INNERMOST, so
     /// the two handlers outside it see the exchange once: version capture observes only the response the
     /// caller gets — the discarded 401's header must not reach the store — and the observation headers

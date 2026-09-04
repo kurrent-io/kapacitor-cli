@@ -914,7 +914,7 @@ public sealed class SetupCommand(
                 await using var scoped = HttpForChosenServer(serverUrl, saved);
 
                 var (deferred, deferredAuth) =
-                    await scoped.GetRequiredService<ICapacitorHttpClient>().ForHookAsync();
+                    await scoped.GetRequiredService<ICapacitorHttpClient>().ForWaitAsync();
 
                 using var _ = deferred;
 
@@ -1511,7 +1511,7 @@ public sealed class SetupCommand(
 
             var flowHttp = scoped.GetRequiredService<ICapacitorHttpClient>();
 
-            var (client, authStatus) = await flowHttp.ForHookAsync();
+            var (client, authStatus) = await flowHttp.ForWaitAsync();
 
             using (client) {
                 client.Timeout = BrowserFlowHttpTimeout;

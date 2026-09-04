@@ -24,19 +24,24 @@ internal sealed class CapacitorHttpClient(
     public Task<HttpClient> ForSessionAsync(CancellationToken ct = default) =>
         Task.FromResult(factory.CreateClient(CapacitorClients.Default));
 
-    public async Task<AuthAttempt> ForHookAsync(CancellationToken ct = default) {
+    public Task<AuthAttempt> ForHookAsync(CancellationToken ct = default) =>
+        AttemptAsync(CapacitorClients.Hook, ct);
+
+    public Task<AuthAttempt> ForWaitAsync(CancellationToken ct = default) =>
+        AttemptAsync(CapacitorClients.Default, ct);
+
+    async Task<AuthAttempt> AttemptAsync(string lane, CancellationToken ct) {
         // Answered before anything is spent: an unusable URL reaches no token store, no discovery and
         // no socket, and the caller's not-usable branch already knows what to do with it.
         if (!server.Usable)
             return new AuthAttempt(
-                factory.CreateClient(CapacitorClients.Hook),
+                factory.CreateClient(lane),
                 AuthStatus.UnusableServerUrl, HttpClientExtensions.SchemeMissingHint);
 
         var state = await credentials.ResolveAsync(ct);
 
         return new AuthAttempt(
-            factory.CreateClient(CapacitorClients.Hook),
-            state.Status, state.Problem, state.Resolution?.IssuedServerUrl);
+            factory.CreateClient(lane), state.Status, state.Problem, state.Resolution?.IssuedServerUrl);
     }
 
     // Resolves nothing: the hint is the only reason ForCommandAsync does, and the handler applies

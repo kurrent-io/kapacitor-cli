@@ -32,11 +32,18 @@ internal sealed class UnauthorizedRecoveryHandler(ICredentialSource source, bool
 
         if (response.StatusCode != HttpStatusCode.Unauthorized) return response;
         if (!recover) return response;
-        if (applied is null) return response; // Nothing was sent, so there is nothing to rotate against.
+
+        // A refusal with nothing sent says the credential did not exist when this handler resolved,
+        // not that it never will: a session client is built once and held for the process's life, so
+        // a login finishing after that would otherwise leave every later send anonymous. Dropping the
+        // memo is what lets the next one ask again.
+        if (applied is null) Volatile.Write(ref _seed, null);
+
         if (!CanResend(request)) return response;
 
         // `applied`, not a re-read: a peer may have rotated already, and blaming its fresh credential
-        // would discard one the server never refused.
+        // would discard one the server never refused. With nothing refused the source re-reads, which
+        // is the only repair available when the rejection names no token.
         var rotated = await source.RotateAsync(applied, cancellationToken);
 
         if (rotated.Bearer is null) return response;

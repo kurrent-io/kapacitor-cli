@@ -15,6 +15,9 @@ public sealed class FixedCapacitorHttpClient : ICapacitorHttpClient {
     public Task<AuthAttempt> ForHookAsync(CancellationToken ct = default) =>
         Task.FromResult(new AuthAttempt(new HttpClient(), AuthStatus.Ok, null, null));
 
+    public Task<AuthAttempt> ForWaitAsync(CancellationToken ct = default) =>
+        Task.FromResult(new AuthAttempt(new HttpClient(), AuthStatus.Ok, null, null));
+
     public Task<HttpClient> ForBackgroundAsync(CancellationToken ct = default) =>
         Task.FromResult(new HttpClient());
 

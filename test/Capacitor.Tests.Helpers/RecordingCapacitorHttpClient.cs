@@ -27,6 +27,9 @@ public sealed class RecordingCapacitorHttpClient(
     public Task<AuthAttempt> ForHookAsync(CancellationToken ct = default) =>
         Task.FromResult(new AuthAttempt(Take(nameof(ForHookAsync)), status, null, null));
 
+    public Task<AuthAttempt> ForWaitAsync(CancellationToken ct = default) =>
+        Task.FromResult(new AuthAttempt(Take(nameof(ForWaitAsync)), status, null, null));
+
     public HttpClient Anonymous() => Take(nameof(Anonymous));
 
     public HttpClient Loopback() => Take(nameof(Loopback));

@@ -39,6 +39,14 @@ public interface ICapacitorHttpClient {
     Task<AuthAttempt> ForHookAsync(CancellationToken ct = default);
 
     /// <summary>
+    /// For a leg that waits on something outside this process — a human in a browser, a flow the
+    /// server answers later: the auth outcome, so the caller can decline to start rather than block
+    /// on a request that can only 401, and the same 401 recovery a command gets, because a wait can
+    /// outlive the short-lived token it began with.
+    /// </summary>
+    Task<AuthAttempt> ForWaitAsync(CancellationToken ct = default);
+
+    /// <summary>
     /// A client with no bearer and no token-store read, for a request that must not mint or spend a
     /// credential: probing a server the caller is still deciding to adopt, or refreshing at the URL
     /// that issued the token rather than the one configured. Resolves nothing, so it is synchronous.
