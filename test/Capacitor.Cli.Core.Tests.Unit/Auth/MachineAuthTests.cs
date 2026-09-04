@@ -47,6 +47,32 @@ public class MachineAuthTests : IDisposable {
                 .WithHeader("Content-Type", "application/json")
                 .WithBody($"{{\"access_token\":\"{token}\",\"expires_in\":{expiresIn}}}"));
 
+    /// <summary>
+    /// The token endpoint is whatever <c>KCAP_WORKOS_TOKEN_URL</c> names — our own sign-in host by
+    /// default, a self-hosted IdP when an operator overrides it. Either may answer a 307 before it
+    /// issues anything. The credential travels in the body, which a 307 preserves, so refusing the hop
+    /// would fail a mint the endpoint never rejected.
+    /// </summary>
+    [Test]
+    public async Task A_redirect_before_the_token_is_followed_and_still_mints() {
+        Clear();
+        UseStubTokenEndpoint();
+
+        _server.Given(Request.Create().WithPath("/oauth2/token").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(307)
+                .WithHeader("Location", $"{_server.Urls[0]}/oauth2/token/regional"));
+
+        _server.Given(Request.Create().WithPath("/oauth2/token/regional").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(200)
+                .WithHeader("Content-Type", "application/json")
+                .WithBody("""{"access_token":"tok_after_hop","expires_in":3600}"""));
+
+        var result = await MachineTokenProvider.GetTokenAsync(
+            new MachineCredential("client_01ABC", "sekrit"), rejectedToken: null, CancellationToken.None);
+
+        await Assert.That(result.Token).IsEqualTo("tok_after_hop");
+    }
+
     // ── Credential reading ─────────────────────────────────────────────────────────────────────
 
     [Test]

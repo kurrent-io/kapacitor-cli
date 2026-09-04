@@ -183,4 +183,61 @@ public class UpdateChannelQueryTests : IDisposable {
         var hits = _server.FindLogEntries(Request.Create().WithPath($"/@kurrent/kcap/{channel}").UsingGet());
         await Assert.That(hits.Count).IsEqualTo(1);
     }
+
+    /// <summary>A well-formed answer that names no version has not failed. Arming the backoff here
+    /// would suppress the next hour of checks over a reply the registry actually gave us.</summary>
+    [Test, NotInParallel("UpdateCommand_RegistryBaseUrl")]
+    public async Task A_reply_naming_no_version_does_not_arm_the_backoff() {
+        const string channel = "test-no-version";
+        _server.Given(Request.Create().WithPath($"/@kurrent/kcap/{channel}").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(200).WithBody("""{"dist-tags":{}}"""));
+
+        var first = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root);
+
+        await Assert.That(first.Latest).IsNull();
+        await Assert.That(first.FromCache).IsFalse();
+
+        await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root);
+
+        var hits = _server.FindLogEntries(Request.Create().WithPath($"/@kurrent/kcap/{channel}").UsingGet());
+        await Assert.That(hits.Count).IsEqualTo(2)
+            .Because("a backoff armed on this answer would have skipped the second check");
+    }
+
+    /// <summary>A body that will not parse is a failure whatever the status line said: no version
+    /// can be read from it, so the next passive caller is spared the same round trip.</summary>
+    [Test, NotInParallel("UpdateCommand_RegistryBaseUrl")]
+    public async Task An_unreadable_body_arms_the_backoff() {
+        const string channel = "test-unreadable-body";
+        _server.Given(Request.Create().WithPath($"/@kurrent/kcap/{channel}").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(200).WithBody("not json"));
+
+        var first = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root);
+
+        await Assert.That(first.Latest).IsNull();
+
+        var second = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root);
+
+        await Assert.That(second.FromCache).IsTrue();
+
+        var hits = _server.FindLogEntries(Request.Create().WithPath($"/@kurrent/kcap/{channel}").UsingGet());
+        await Assert.That(hits.Count).IsEqualTo(1);
+    }
+
+    /// <summary>The registry is a third party we are a guest of, and the agent name is what
+    /// identifies us in its logs and its rate limits. Nothing on the calling path reads it, so
+    /// only the request as sent can show it is still there.</summary>
+    [Test, NotInParallel("UpdateCommand_RegistryBaseUrl")]
+    public async Task The_registry_request_names_the_agent() {
+        const string channel = "test-agent-name";
+        _server.Given(Request.Create().WithPath($"/@kurrent/kcap/{channel}").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(200).WithBody("""{"version":"0.16.0"}"""));
+
+        await UpdateCommand.CheckForUpdateAsync(forceCheck: true, channel, Config.Root);
+
+        var sent = _server.FindLogEntries(Request.Create().WithPath($"/@kurrent/kcap/{channel}").UsingGet())
+            .Single().RequestMessage;
+
+        await Assert.That(sent.Headers!["User-Agent"].Single()).IsEqualTo("kcap-cli");
+    }
 }
