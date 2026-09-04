@@ -41,9 +41,9 @@ public class UnusableUrlGuardTests : IDisposable {
     // parameter would let a caller point a guard at a URL the process never resolved.
     ProfileContext  Bad => field ??= Resolutions.At(BadUrl, Config.Root);
 
-    AgentHookPoster  Poster => field ??= new(Config.Root, Bad);
+    AgentHookPoster  Poster => field ??= new(Config.Root, Bad, new FixedCapacitorHttpClient());
 
-    WatcherManager  Watchers => field ??= new(Config.Root, Bad);
+    WatcherManager  Watchers => field ??= new(Config.Root, Bad, new FixedCapacitorHttpClient());
 
     public UnusableUrlGuardTests() {
         _tdir = _tmp.PathTo("tdir");
@@ -171,7 +171,7 @@ public class UnusableUrlGuardTests : IDisposable {
         // malformed KCAP_URL. A guard rendering a fixed source passes every other test here.
         using var capture = ConsoleOutput.StartErrorCapture();
 
-        var watchers = new WatcherManager(Config.Root, Resolutions.At(BadUrl, Config.Root, UrlSource.Environment));
+        var watchers = new WatcherManager(Config.Root, Resolutions.At(BadUrl, Config.Root, UrlSource.Environment), new FixedCapacitorHttpClient());
 
         await watchers.InlineDrainAsync(Sid, Path.Combine(_dir, "t.jsonl"), agentId: null);
 
@@ -205,7 +205,7 @@ public class UnusableUrlGuardTests : IDisposable {
         // normalization, so passing the raw payload id straight through would miss it entirely.
         var body = $$"""{"session_id":"{{dashed}}","hook_event_name":"SessionStart"}""";
 
-        await Assert.That(await new ClaudeHookCommand(Config.Root, Resolutions.None(Config.Root), _clock, Home).ShouldSuppressCaptureAsync(
+        await Assert.That(await new ClaudeHookCommand(Config.Root, Resolutions.None(Config.Root), _clock, Home, new FixedCapacitorHttpClient()).ShouldSuppressCaptureAsync(
             dashless, body, "session-start", activeProfile: null, _clock.Budget(Ceiling))).IsTrue();
     }
 
@@ -216,7 +216,7 @@ public class UnusableUrlGuardTests : IDisposable {
 
         var body = $$"""{"session_id":"{{sid}}","hook_event_name":"SessionEnd"}""";
 
-        await Assert.That(await new ClaudeHookCommand(Config.Root, Resolutions.None(Config.Root), _clock, Home).ShouldSuppressCaptureAsync(
+        await Assert.That(await new ClaudeHookCommand(Config.Root, Resolutions.None(Config.Root), _clock, Home, new FixedCapacitorHttpClient()).ShouldSuppressCaptureAsync(
             sid, body, "session-end", activeProfile: null, _clock.Budget(Ceiling))).IsTrue();
 
         // Collapsing the gate into a plain boolean would have dropped this cleanup.
@@ -229,7 +229,7 @@ public class UnusableUrlGuardTests : IDisposable {
         var sid  = Guid.NewGuid().ToString("N");
         var body = $$"""{"session_id":"{{sid}}","hook_event_name":"SessionStart"}""";
 
-        await Assert.That(await new ClaudeHookCommand(Config.Root, Resolutions.None(Config.Root), _clock, Home).ShouldSuppressCaptureAsync(
+        await Assert.That(await new ClaudeHookCommand(Config.Root, Resolutions.None(Config.Root), _clock, Home, new FixedCapacitorHttpClient()).ShouldSuppressCaptureAsync(
             sid, body, "session-start", activeProfile: null, _clock.Budget(Ceiling))).IsFalse();
     }
 
@@ -238,7 +238,7 @@ public class UnusableUrlGuardTests : IDisposable {
     public async Task Cursor_never_builds_a_client_for_an_unusable_url() {
         var entered = false;
 
-        var exit = await new CursorHookCommand(Config.Root, Bad, new HookClock(TimeProvider.System), Home).HandleWithDeps(
+        var exit = await new CursorHookCommand(Config.Root, Bad, new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).HandleWithDeps(
             new StringReader("""{"hook_event_name":"sessionStart","session_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"""),
             _ => {
                 entered = true;
@@ -258,7 +258,7 @@ public class UnusableUrlGuardTests : IDisposable {
     public async Task Claude_never_builds_a_client_for_an_unusable_url() {
         var entered = false;
 
-        var exit = await new ClaudeHookCommand(Config.Root, Bad, new HookClock(TimeProvider.System), Home).HandleWithDeps(
+        var exit = await new ClaudeHookCommand(Config.Root, Bad, new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).HandleWithDeps(
             new HookSpool(_dir),
             stdin: new StringReader($$"""{"hook_event_name":"SessionStart","session_id":"{{Sid}}"}"""),
             clientFactory: () => {

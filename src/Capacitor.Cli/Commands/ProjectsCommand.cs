@@ -1,49 +1,33 @@
-using System.Net;
-using System.Text.Json;
 using Capacitor.Cli.Core;
-using Capacitor.Cli.Core.Config;
+using Capacitor.Cli.Core.Http;
 using Spectre.Console;
 
 namespace Capacitor.Cli.Commands;
 
 /// <summary>
 /// <c>kcap projects</c> / <c>kcap project &lt;slug&gt;</c> — read-only views over the server's
-/// <c>/api/projects</c> endpoints. Follows <see cref="ErrorsCommand"/> for client/auth/error handling.
-/// Every route 403s with <c>projects_not_in_plan</c> on the Free plan (see <see cref="CliProjectError"/>).
+/// <c>/api/projects</c> endpoints. Every route 403s with <c>projects_not_in_plan</c> on the Free plan
+/// (see <see cref="CliProjectError"/>).
 /// </summary>
-class ProjectsCommand(ConfigRoot config, ProfileContext profiles) {
+class ProjectsCommand(IProjectsApi projectsApi) {
     public async Task<int> HandleList() {
-        var       baseUrl    = profiles.Resolution.ServerUrl!;
-        using var httpClient = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
-
-        HttpResponseMessage resp;
+        ProjectsResult result;
 
         try {
-            resp = await httpClient.GetWithRetryAsync($"{baseUrl}/api/projects");
-        } catch (HttpRequestException ex) {
-            HttpClientExtensions.WriteUnreachableError(baseUrl, ex);
+            result = await projectsApi.GetProjectsAsync();
+        } catch (CapacitorApiException ex) {
+            await Console.Error.WriteLineAsync(ex.Message);
 
             return 1;
         }
 
-        if (await HttpClientExtensions.HandleUnauthorizedAsync(resp)) {
-            return 1;
+        if (result is ProjectsResult.Forbidden(var errorCode)) {
+            return ReportForbidden(errorCode);
         }
 
-        if (resp.StatusCode == HttpStatusCode.Forbidden) {
-            return await ReportForbidden(resp);
-        }
+        var projects = ((ProjectsResult.Found)result).Projects;
 
-        if (!resp.IsSuccessStatusCode) {
-            await Console.Error.WriteLineAsync($"HTTP {(int)resp.StatusCode}");
-
-            return 1;
-        }
-
-        var json     = await resp.Content.ReadAsStringAsync();
-        var projects = JsonSerializer.Deserialize(json, CapacitorJsonContext.Default.ListCliProjectSummary);
-
-        if (projects is null || projects.Count == 0) {
+        if (projects.Count == 0) {
             await Console.Out.WriteLineAsync("No projects found.");
 
             return 0;
@@ -72,47 +56,27 @@ class ProjectsCommand(ConfigRoot config, ProfileContext profiles) {
     }
 
     public async Task<int> HandleDetail(string slug) {
-        var       baseUrl    = profiles.Resolution.ServerUrl!;
-        using var httpClient = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
-
-        HttpResponseMessage resp;
+        ProjectResult result;
 
         try {
-            resp = await httpClient.GetWithRetryAsync($"{baseUrl}/api/projects/{Uri.EscapeDataString(slug)}");
-        } catch (HttpRequestException ex) {
-            HttpClientExtensions.WriteUnreachableError(baseUrl, ex);
+            result = await projectsApi.GetProjectAsync(slug);
+        } catch (CapacitorApiException ex) {
+            await Console.Error.WriteLineAsync(ex.Message);
 
             return 1;
         }
 
-        if (await HttpClientExtensions.HandleUnauthorizedAsync(resp)) {
-            return 1;
+        if (result is ProjectResult.Forbidden(var errorCode)) {
+            return ReportForbidden(errorCode);
         }
 
-        if (resp.StatusCode == HttpStatusCode.Forbidden) {
-            return await ReportForbidden(resp);
-        }
-
-        if (resp.StatusCode == HttpStatusCode.NotFound) {
+        if (result is ProjectResult.NotFound) {
             await Console.Error.WriteLineAsync("Project not found.");
 
             return 1;
         }
 
-        if (!resp.IsSuccessStatusCode) {
-            await Console.Error.WriteLineAsync($"HTTP {(int)resp.StatusCode}");
-
-            return 1;
-        }
-
-        var json    = await resp.Content.ReadAsStringAsync();
-        var project = JsonSerializer.Deserialize(json, CapacitorJsonContext.Default.CliProjectDetail);
-
-        if (project is null) {
-            await Console.Error.WriteLineAsync("Project not found.");
-
-            return 1;
-        }
+        var project = ((ProjectResult.Found)result).Project;
 
         await Console.Out.WriteLineAsync($"{project.Name} ({project.Slug})");
 
@@ -161,22 +125,14 @@ class ProjectsCommand(ConfigRoot config, ProfileContext profiles) {
     /// Every <c>/api/projects*</c> route 403s identically when the tenant plan doesn't include
     /// projects (Free). Falls back to a generic message for any other 403 shape.
     /// </summary>
-    static async Task<int> ReportForbidden(HttpResponseMessage resp) {
-        var body = await resp.Content.ReadAsStringAsync();
+    static int ReportForbidden(string? errorCode) {
+        if (errorCode == "projects_not_in_plan") {
+            Console.Error.WriteLine("Projects require the Team or Enterprise plan.");
 
-        try {
-            using var doc = JsonDocument.Parse(body);
-
-            if (doc.RootElement.Str("error") == "projects_not_in_plan") {
-                await Console.Error.WriteLineAsync("Projects require the Team or Enterprise plan.");
-
-                return 1;
-            }
-        } catch (JsonException) {
-            /* fall through to generic message */
+            return 1;
         }
 
-        await Console.Error.WriteLineAsync("Forbidden.");
+        Console.Error.WriteLine("Forbidden.");
 
         return 1;
     }

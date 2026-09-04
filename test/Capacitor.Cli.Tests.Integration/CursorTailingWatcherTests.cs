@@ -46,7 +46,7 @@ namespace Capacitor.Cli.Tests.Integration;
                 // with WatcherLifecycleTests / WatcherHeartbeatStalenessTests (bare NotInParallel
                 // — no explicit key — puts all of them in the same implicit mutual-exclusion bucket).
 public class CursorTailingWatcherTests {
-    WatchCommand Watch => field ??= new(Config.Root, Resolutions.None(Config.Root), Home);
+    WatchCommand Watch => field ??= new(Config.Root, Resolutions.None(Config.Root), Home, new FixedCapacitorHttpClient(), new FixedCredentialSource());
 
     CursorMarkers Markers => new(Config.Root);
 
@@ -196,7 +196,7 @@ public class CursorTailingWatcherTests {
         var spool = new HookSpool(tmp.PathTo("spool"));
 
         var body = $$"""{"hook_event_name":"sessionStart","session_id":"{{sessionId}}","transcript_path":"{{transcriptPath.Replace(@"\", @"\\")}}"}""";
-        var exit = await new CursorHookCommand(Config.Root, Resolutions.At(server.Url!, Config.Root), new HookClock(TimeProvider.System), Home).HandleCore(client, new StringReader(body), spool);
+        var exit = await new CursorHookCommand(Config.Root, Resolutions.At(server.Url!, Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).HandleCore(client, new StringReader(body), spool);
 
         await Assert.That(exit).IsEqualTo(0);
         await Assert.That(spawned).IsEquivalentTo([sessionId]);
@@ -231,7 +231,7 @@ public class CursorTailingWatcherTests {
         var spool = new HookSpool(tmp.PathTo("spool"));
 
         var body = $$"""{"hook_event_name":"postToolUse","session_id":"{{sessionId}}","transcript_path":"{{transcriptPath.Replace(@"\", @"\\")}}","tool_name":"Bash"}""";
-        var exit = await new CursorHookCommand(Config.Root, Resolutions.At(server.Url!, Config.Root), new HookClock(TimeProvider.System), Home).HandleCore(client, new StringReader(body), spool);
+        var exit = await new CursorHookCommand(Config.Root, Resolutions.At(server.Url!, Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).HandleCore(client, new StringReader(body), spool);
 
         await Assert.That(exit).IsEqualTo(0);
         await Assert.That(spawned).IsEquivalentTo([sessionId]);

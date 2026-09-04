@@ -21,7 +21,7 @@ public enum GateReason { NoProfile, InvalidServerUrl, NoToken, TokenUnusableBind
 /// inverse of "does TokenStore already consider this profile authenticated" — so every branch
 /// here mirrors a specific TokenStore rule rather than inventing its own.
 /// </summary>
-public sealed class OnboardingGate(ConfigRoot config) {
+public sealed class OnboardingGate(ConfigRoot config, TokenStore tokenStore) {
     /// <summary>
     /// The ONE shared validator for "is this usable as a server identity" — also used by
     /// <c>App.ValidProfileName</c> so the gate and the lifecycle-controller precondition can
@@ -78,7 +78,7 @@ public sealed class OnboardingGate(ConfigRoot config) {
 
         // Raw, refresh-free read — a stale/expiring token must not be rotated just to answer
         // "is the wizard needed", which would spend a rotating WorkOS refresh token for nothing.
-        var tokens = await new TokenStore(config).LoadForProfileAsync(profileName, ct);
+        var tokens = await tokenStore.LoadForProfileAsync(profileName, ct);
 
         if (tokens is null) {
             return new GateResult.Incomplete(GateReason.NoToken);

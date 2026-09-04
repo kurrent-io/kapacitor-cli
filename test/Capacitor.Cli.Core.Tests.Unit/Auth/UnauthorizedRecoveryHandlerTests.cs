@@ -10,7 +10,7 @@ namespace Capacitor.Cli.Core.Tests.Unit.Auth;
 /// wrong token, resending with a stale header, leaking the first response — all live in the
 /// interaction, not in any single method.
 /// </summary>
-public class UnauthorizedRetryHandlerTests {
+public class UnauthorizedRecoveryHandlerTests {
     [TempConfigRoot] public required TempConfigRoot Config { get; init; }
 
     [Test]
@@ -55,7 +55,7 @@ public class UnauthorizedRetryHandlerTests {
         // The store already holds a NEWER token than the one this request sent — exactly what a
         // peer process leaves behind. The retry must adopt it (and the dedup rule means no
         // rotation is attempted, so no refresh endpoint is contacted).
-        await new TokenStore(Config.Root).SaveAsync("default", Token("peer-refreshed"));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("default", Token("peer-refreshed"));
 
         var transport = new RecordingHandler(HttpStatusCode.Unauthorized, HttpStatusCode.OK);
         using var client = Client(transport, Token("original"));
@@ -68,7 +68,7 @@ public class UnauthorizedRetryHandlerTests {
 
     [Test]
     public async Task Exactly_one_extra_attempt_is_made_when_the_retry_also_fails() {
-        await new TokenStore(Config.Root).SaveAsync("default", Token("peer-refreshed"));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("default", Token("peer-refreshed"));
 
         var transport = new RecordingHandler(HttpStatusCode.Unauthorized, HttpStatusCode.Unauthorized);
         using var client = Client(transport, Token("original"));
@@ -82,7 +82,7 @@ public class UnauthorizedRetryHandlerTests {
     [Test]
     public async Task The_first_401_response_is_disposed_before_the_retry() {
         // Every recovered 401 would otherwise leak its response content/connection.
-        await new TokenStore(Config.Root).SaveAsync("default", Token("peer-refreshed"));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("default", Token("peer-refreshed"));
 
         var transport = new RecordingHandler(HttpStatusCode.Unauthorized, HttpStatusCode.OK);
         using var client = Client(transport, Token("original"));
@@ -94,7 +94,7 @@ public class UnauthorizedRetryHandlerTests {
 
     [Test]
     public async Task A_buffered_body_is_replayed_on_the_retry() {
-        await new TokenStore(Config.Root).SaveAsync("default", Token("peer-refreshed"));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("default", Token("peer-refreshed"));
 
         var transport = new RecordingHandler(HttpStatusCode.Unauthorized, HttpStatusCode.OK);
         using var client = Client(transport, Token("original"));
@@ -110,7 +110,7 @@ public class UnauthorizedRetryHandlerTests {
     public async Task A_json_body_is_replayed_on_the_retry() {
         // JsonContent re-serializes its value on every send, so it IS replayable. Excluding it
         // would silently leave every JSON-posting call site without 401 recovery.
-        await new TokenStore(Config.Root).SaveAsync("default", Token("peer-refreshed"));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("default", Token("peer-refreshed"));
 
         var transport = new RecordingHandler(HttpStatusCode.Unauthorized, HttpStatusCode.OK);
         using var client = Client(transport, Token("original"));
@@ -126,7 +126,7 @@ public class UnauthorizedRetryHandlerTests {
     public async Task A_peer_token_for_a_different_server_is_never_adopted() {
         // The handler is pinned to one server; a peer login elsewhere must not be picked up and
         // sent to it.
-        await new TokenStore(Config.Root).SaveAsync("default", Token("peer-elsewhere") with { ServerUrl = "http://127.0.0.1:9" });
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("default", Token("peer-elsewhere") with { ServerUrl = "http://127.0.0.1:9" });
 
         var transport = new RecordingHandler(HttpStatusCode.Unauthorized, HttpStatusCode.OK);
         using var client = Client(transport, Token("original"));
@@ -141,7 +141,7 @@ public class UnauthorizedRetryHandlerTests {
     public async Task A_non_replayable_body_is_not_retried() {
         // Resending a consumed stream would send an empty or corrupt body; surfacing the 401 is
         // the honest outcome.
-        await new TokenStore(Config.Root).SaveAsync("default", Token("peer-refreshed"));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("default", Token("peer-refreshed"));
 
         var transport = new RecordingHandler(HttpStatusCode.Unauthorized, HttpStatusCode.OK);
         using var client = Client(transport, Token("original"));
@@ -159,7 +159,7 @@ public class UnauthorizedRetryHandlerTests {
         // rejected-token attribution this depends on is asserted directly against the dedup rule
         // in TokenServerBindingTests — here we only establish that concurrency doesn't produce a
         // token that was never in play, or a torn read.
-        await new TokenStore(Config.Root).SaveAsync("default", Token("peer-refreshed"));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("default", Token("peer-refreshed"));
 
         var transport = new RecordingHandler(HttpStatusCode.Unauthorized, HttpStatusCode.OK);
         using var client = Client(transport, Token("original"));
@@ -171,12 +171,87 @@ public class UnauthorizedRetryHandlerTests {
         await Assert.That(responses.Count(r => r.StatusCode == HttpStatusCode.OK)).IsGreaterThan(0);
     }
 
+    [Test]
+    public async Task A_no_bearer_state_is_resolved_once_across_several_sends() {
+        // Every status that yields no bearer (NoAuthRequired here) must not re-run discovery and a
+        // token-store read on every send once the handler already knows there is nothing to attach.
+        var source    = new CountingNoBearerSource();
+        var transport = new RecordingHandler(HttpStatusCode.OK, HttpStatusCode.OK, HttpStatusCode.OK);
+        using var client = new HttpClient(new UnauthorizedRecoveryHandler(source) { InnerHandler = transport });
+
+        await client.GetAsync("https://kcap.example.com/api/thing");
+        await client.GetAsync("https://kcap.example.com/api/thing");
+        await client.GetAsync("https://kcap.example.com/api/thing");
+
+        await Assert.That(source.ResolveCount).IsEqualTo(1);
+        await Assert.That(transport.SentTokens).IsEquivalentTo(["<none>", "<none>", "<none>"]);
+    }
+
+    /// <summary>
+    /// A resolve that throws is not an answer to memoize: the source is reachable again on the next
+    /// send, and one unreachable moment must not become this handler's verdict for every later send.
+    /// </summary>
+    [Test]
+    public async Task A_failed_resolve_is_retried_on_the_next_send() {
+        var source    = new ThrowsOnceSource("tok_after_recovery");
+        var transport = new RecordingHandler(HttpStatusCode.OK, HttpStatusCode.OK);
+        using var client = new HttpClient(new UnauthorizedRecoveryHandler(source) { InnerHandler = transport });
+
+        await Assert.That(async () => await client.GetAsync("https://kcap.example.com/api/thing"))
+            .Throws<HttpRequestException>();
+
+        await client.GetAsync("https://kcap.example.com/api/thing");
+
+        await Assert.That(source.ResolveCount).IsEqualTo(2);
+        await Assert.That(transport.SentTokens).IsEquivalentTo(["tok_after_recovery"]);
+    }
+
+    sealed class ThrowsOnceSource(string bearer) : ICredentialSource {
+        int _resolveCount;
+
+        public int ResolveCount => Volatile.Read(ref _resolveCount);
+
+        public Task<CredentialState> ResolveAsync(CancellationToken ct) =>
+            Interlocked.Increment(ref _resolveCount) == 1
+                ? throw new HttpRequestException("discovery unreachable")
+                : Task.FromResult(new CredentialState(bearer, AuthStatus.Ok));
+
+        public Task<CredentialState> RotateAsync(string? refused, CancellationToken ct) => ResolveAsync(ct);
+    }
+
+    sealed class CountingNoBearerSource : ICredentialSource {
+        int _resolveCount;
+
+        public int ResolveCount => Volatile.Read(ref _resolveCount);
+
+        public Task<CredentialState> ResolveAsync(CancellationToken ct) {
+            Interlocked.Increment(ref _resolveCount);
+
+            return Task.FromResult(new CredentialState(null, AuthStatus.NotAuthenticated));
+        }
+
+        public Task<CredentialState> RotateAsync(string? refused, CancellationToken ct) => ResolveAsync(ct);
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
+    // Seeds the handler's first resolve with `initial` directly rather than through the store, so a
+    // wrong-server or empty store entry set up for the ROTATE path never leaks into the seed. Rotation
+    // still goes to the real, store-backed source, which is what these tests exercise.
     HttpClient Client(RecordingHandler transport, StoredTokens initial) {
-        var retry = new UnauthorizedRetryHandler(Config.Root, ProfileConfig.DefaultName, initial, "https://kcap.example.com") { InnerHandler = transport };
+        var real   = new TokenStoreCredentials(AuthFixtures.NewTokenStore(Config.Root), ProfileConfig.DefaultName, "https://kcap.example.com");
+        var source = new SeededResolve(initial.AccessToken, real);
+        var retry  = new UnauthorizedRecoveryHandler(source) { InnerHandler = transport };
 
         return new(retry);
+    }
+
+    sealed class SeededResolve(string bearer, ICredentialSource rotateVia) : ICredentialSource {
+        public Task<CredentialState> ResolveAsync(CancellationToken ct) =>
+            Task.FromResult(new CredentialState(bearer, AuthStatus.Ok));
+
+        public Task<CredentialState> RotateAsync(string? refused, CancellationToken ct) =>
+            rotateVia.RotateAsync(refused, ct);
     }
 
     static StoredTokens Token(string accessToken) => new() {

@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Net;
-using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -11,6 +10,8 @@ using Capacitor.Cli.Core.Telemetry;
 using Capacitor.Cli.Core.Config;
 using Capacitor.Cli.Core.WorkItems;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands;
 
 /// <summary> P2 task 17: MCP tools for the work-items correlation surface — attach the
@@ -18,7 +19,7 @@ namespace Capacitor.Cli.Commands;
 /// already attached to. Cloned from <see cref="McpMemoryServer"/>'s stdio JSON-RPC loop; unlike
 /// memory this server has no repo/machine context to resolve — the only per-call input is the
 /// session id and the declare selector, both carried in the tool arguments.</summary>
-sealed class McpWorkItemsServer(ConfigRoot config, ProfileContext profiles) {
+sealed class McpWorkItemsServer(ConfigRoot config, ProfileContext profiles, TokenStore tokens, ICapacitorHttpClient http) {
     internal const string NotLoggedInMessage = AuthRejectionNotice.NotLoggedIn;
 
     internal const string NoSessionIdMessage =
@@ -34,7 +35,7 @@ sealed class McpWorkItemsServer(ConfigRoot config, ProfileContext profiles) {
         // "mcp-server" so per-tool-call events actually leave. Best-effort: a stale token on
         // disk must never block the server from starting.
         var loggedIn = false;
-        try { loggedIn = await new TokenStore(config).LoadForProfileAsync(profiles.Name) is not null; } catch { }
+        try { loggedIn = await tokens.LoadForProfileAsync(profiles.Name) is not null; } catch { }
         CliTelemetry.Initialize("mcp-server", baseUrl, loggedIn, config);
 
         // Validate the server_url shape once, locally (pure string check — no network, token,
@@ -48,16 +49,14 @@ sealed class McpWorkItemsServer(ConfigRoot config, ProfileContext profiles) {
         HttpClient? client = null;
 
         // Guarded tool dispatch: never let the stdio JSON-RPC loop die on one bad request. An
-        // unusable server_url would otherwise reach EnsureAbsolute inside the auth-client factory,
-        // which hard-exits the process (Environment.Exit(2)) mid-request; and an unexpected
-        // failure would bubble out of the loop. Return a JSON-RPC tool error in both cases so the
-        // server keeps serving.
+        // unexpected failure would otherwise bubble out of the loop and kill the server mid-protocol;
+        // return a JSON-RPC tool error instead so it keeps serving.
         async Task<string> DispatchToolCallAsync(JsonNode callId, JsonObject callRequest) {
             if (!urlOk)
                 return BuildToolResult(callId, HttpClientExtensions.SchemeMissingHint, isError: true);
 
             try {
-                client ??= await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl, autoRetryUnauthorized: false);
+                client ??= await http.ForSessionAsync();
                 return await HandleToolCallAsync(callId, callRequest, client, baseUrl);
             } catch (Exception ex) {
                 // Unexpected: log the detail to stderr (not to the client, which could leak local
@@ -169,22 +168,22 @@ sealed class McpWorkItemsServer(ConfigRoot config, ProfileContext profiles) {
 
         try {
             using var httpResponse = toolName switch {
-                "declare_work_item"      => await SendWithRefreshRetryAsync(client, baseUrl, c => c.PostAsync($"{baseUrl}/api/work-items/declare", ToJsonContent(BuildDeclareBody(arguments)))),
-                "get_session_work_items" => await SendWithRefreshRetryAsync(client, baseUrl, c => c.GetAsync(BuildSessionUrl(baseUrl, arguments))),
+                "declare_work_item"      => await client.PostAsync($"{baseUrl}/api/work-items/declare", ToJsonContent(BuildDeclareBody(arguments))),
+                "get_session_work_items" => await client.GetAsync(BuildSessionUrl(baseUrl, arguments)),
 
                 // The declared breakdown/relation surface. Every id is a
                 // REQUIRED argument here, unlike session_id: there is no ambient "current work item"
                 // to fall back to, and guessing one would attach the wrong graph edge.
-                "declare_work_breakdown" => await SendWithRefreshRetryAsync(client, baseUrl, c => c.PostAsync(
-                    ItemUrl(baseUrl, arguments, "parent_id", "breakdown"), ToJsonContent(BuildBreakdownBody(arguments)))),
-                "retract_work_breakdown" => await SendWithRefreshRetryAsync(client, baseUrl, c => c.PostAsync(
-                    ItemUrl(baseUrl, arguments, "parent_id", "breakdown/retract"), ToJsonContent(BuildBreakdownBody(arguments)))),
-                "declare_work_relation"  => await SendWithRefreshRetryAsync(client, baseUrl, c => c.PostAsync(
-                    ItemUrl(baseUrl, arguments, "from_id", "relations"), ToJsonContent(BuildRelationBody(arguments)))),
-                "retract_work_relation"  => await SendWithRefreshRetryAsync(client, baseUrl, c => c.PostAsync(
-                    ItemUrl(baseUrl, arguments, "from_id", "relations/retract"), ToJsonContent(BuildRelationBody(arguments)))),
-                "get_work_item_topology" => await SendWithRefreshRetryAsync(client, baseUrl, c => c.GetAsync(
-                    ItemUrl(baseUrl, arguments, "work_item_id", "topology"))),
+                "declare_work_breakdown" => await client.PostAsync(
+                    ItemUrl(baseUrl, arguments, "parent_id", "breakdown"), ToJsonContent(BuildBreakdownBody(arguments))),
+                "retract_work_breakdown" => await client.PostAsync(
+                    ItemUrl(baseUrl, arguments, "parent_id", "breakdown/retract"), ToJsonContent(BuildBreakdownBody(arguments))),
+                "declare_work_relation"  => await client.PostAsync(
+                    ItemUrl(baseUrl, arguments, "from_id", "relations"), ToJsonContent(BuildRelationBody(arguments))),
+                "retract_work_relation"  => await client.PostAsync(
+                    ItemUrl(baseUrl, arguments, "from_id", "relations/retract"), ToJsonContent(BuildRelationBody(arguments))),
+                "get_work_item_topology" => await client.GetAsync(
+                    ItemUrl(baseUrl, arguments, "work_item_id", "topology")),
 
                 _                        => throw new ArgumentException($"Unknown tool: {toolName}")
             };
@@ -192,7 +191,7 @@ sealed class McpWorkItemsServer(ConfigRoot config, ProfileContext profiles) {
             var body = await httpResponse.Content.ReadAsStringAsync();
 
             if (httpResponse.StatusCode == HttpStatusCode.Unauthorized) {
-                return BuildToolResult(id, await AuthRejectionNotice.ForPersistentUnauthorizedAsync(config, profiles.Name, baseUrl), isError: true);
+                return BuildToolResult(id, await AuthRejectionNotice.ForPersistentUnauthorizedAsync(tokens, profiles.Name, baseUrl), isError: true);
             }
 
             if (!httpResponse.IsSuccessStatusCode) {
@@ -205,45 +204,6 @@ sealed class McpWorkItemsServer(ConfigRoot config, ProfileContext profiles) {
         } catch (HttpRequestException ex) {
             return BuildToolResult(id, $"Error: {ex.Message}", isError: true);
         }
-    }
-
-    /// <summary>
-    /// Sends an HTTP request with one-shot retry on 401. The MCP server reuses a single
-    /// <see cref="HttpClient"/> for the lifetime of the agent session, so a cached token
-    /// that was valid at startup may have expired by the time a tool call is made. On 401
-    /// we ask <see cref="TokenStore.GetValidTokensForProfileAsync"/> for a fresh token (which triggers
-    /// the refresh flow for WorkOS / GitHubApp), update the client's <c>Authorization</c>
-    /// header, and retry the same request once. If refresh fails (genuinely not logged in
-    /// or refresh-token expired), the original 401 is returned and the caller surfaces the
-    /// store-aware <see cref="AuthRejectionNotice"/> line (which keeps the legacy
-    /// "Not logged in" wording only for a genuinely missing login).
-    /// </summary>
-    async Task<HttpResponseMessage> SendWithRefreshRetryAsync(HttpClient client, string baseUrl, Func<HttpClient, Task<HttpResponseMessage>> send) {
-        var response = await send(client);
-
-        if (response.StatusCode != HttpStatusCode.Unauthorized) return response;
-
-        // Force a refresh against the token this client actually sent: the 401 proves the server
-        // rejected it even though it may still look unexpired locally, which a plain load would
-        // not heal. Passing the rejected token also means a peer process that already refreshed is
-        // adopted rather than rotated a second time. With no token attached at all — this MCP
-        // process outlives a `kcap login` that finished after the client was built — there is
-        // nothing to refresh, so just pick up whatever is stored now.
-        var rejected = client.DefaultRequestHeaders.Authorization?.Parameter;
-
-        // A failed rotation must not be worse than no rotation: fall back to whatever is stored so
-        // the pre-existing "re-read and resend once" recovery still happens.
-        var tokens    = new TokenStore(config);
-        var refreshed = rejected is null
-            ? (await tokens.GetValidTokensForServerAsync(profiles.Name, baseUrl)).Tokens
-            : await tokens.RecoverForServerAsync(profiles.Name, baseUrl, rejected);
-
-        if (refreshed is null) return response; // genuinely not logged in; keep the original 401
-
-        response.Dispose();
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", refreshed.AccessToken);
-
-        return await send(client);
     }
 
     static StringContent ToJsonContent(JsonObject body) => new(body.ToJsonString(), Encoding.UTF8, "application/json");

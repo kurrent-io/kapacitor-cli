@@ -14,7 +14,7 @@ public class TokenStoreProfileTests {
 
     [Test]
     public async Task SaveAsync_with_profile_writes_to_per_profile_path() {
-        await new TokenStore(Config.Root).SaveAsync("acme", MakeTokens("alice"));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("acme", MakeTokens("alice"));
 
         var expected = Path.Combine(TokensDir, "acme.json");
         await Assert.That(File.Exists(expected)).IsTrue();
@@ -22,8 +22,8 @@ public class TokenStoreProfileTests {
 
     [Test]
     public async Task LoadAsync_with_profile_reads_per_profile_file() {
-        await new TokenStore(Config.Root).SaveAsync("acme", MakeTokens("alice"));
-        var loaded = await new TokenStore(Config.Root).LoadAsync("acme");
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("acme", MakeTokens("alice"));
+        var loaded = await AuthFixtures.NewTokenStore(Config.Root).LoadAsync("acme");
 
         await Assert.That(loaded).IsNotNull();
         await Assert.That(loaded!.GitHubUsername).IsEqualTo("alice");
@@ -31,7 +31,7 @@ public class TokenStoreProfileTests {
 
     [Test]
     public async Task LoadAsync_with_unknown_profile_returns_null() {
-        var loaded = await new TokenStore(Config.Root).LoadAsync("nonexistent");
+        var loaded = await AuthFixtures.NewTokenStore(Config.Root).LoadAsync("nonexistent");
 
         await Assert.That(loaded).IsNull();
     }
@@ -46,7 +46,7 @@ public class TokenStoreProfileTests {
             System.Text.Json.JsonSerializer.Serialize(MakeTokens("legacy"), CapacitorJsonContext.Default.StoredTokens)
         );
 
-        await new TokenStore(Config.Root).SaveAsync("acme", MakeTokens("alice"));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("acme", MakeTokens("alice"));
 
         await Assert.That(File.Exists(LegacyPath)).IsFalse();
         await Assert.That(File.Exists(Path.Combine(TokensDir, "acme.json"))).IsTrue();
@@ -54,44 +54,44 @@ public class TokenStoreProfileTests {
 
     [Test]
     public async Task Per_profile_files_are_independent() {
-        await new TokenStore(Config.Root).SaveAsync("acme", MakeTokens("alice"));
-        await new TokenStore(Config.Root).SaveAsync("contoso", MakeTokens("bob"));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("acme", MakeTokens("alice"));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("contoso", MakeTokens("bob"));
 
-        await Assert.That((await new TokenStore(Config.Root).LoadAsync("acme"))!.GitHubUsername).IsEqualTo("alice");
-        await Assert.That((await new TokenStore(Config.Root).LoadAsync("contoso"))!.GitHubUsername).IsEqualTo("bob");
+        await Assert.That((await AuthFixtures.NewTokenStore(Config.Root).LoadAsync("acme"))!.GitHubUsername).IsEqualTo("alice");
+        await Assert.That((await AuthFixtures.NewTokenStore(Config.Root).LoadAsync("contoso"))!.GitHubUsername).IsEqualTo("bob");
     }
 
     [Test]
     public async Task DeleteAsync_removes_all_profile_tokens() {
-        await new TokenStore(Config.Root).SaveAsync("acme", MakeTokens("alice"));
-        await new TokenStore(Config.Root).SaveAsync("contoso", MakeTokens("bob"));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("acme", MakeTokens("alice"));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("contoso", MakeTokens("bob"));
 
-        await new TokenStore(Config.Root).DeleteAsync();
+        await AuthFixtures.NewTokenStore(Config.Root).DeleteAsync();
 
-        await Assert.That(await new TokenStore(Config.Root).LoadAsync("acme")).IsNull();
-        await Assert.That(await new TokenStore(Config.Root).LoadAsync("contoso")).IsNull();
+        await Assert.That(await AuthFixtures.NewTokenStore(Config.Root).LoadAsync("acme")).IsNull();
+        await Assert.That(await AuthFixtures.NewTokenStore(Config.Root).LoadAsync("contoso")).IsNull();
     }
 
     [Test]
     public async Task Delete_with_profile_removes_only_that_profile() {
-        await new TokenStore(Config.Root).SaveAsync("acme", MakeTokens("alice"));
-        await new TokenStore(Config.Root).SaveAsync("contoso", MakeTokens("bob"));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("acme", MakeTokens("alice"));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("contoso", MakeTokens("bob"));
 
-        new TokenStore(Config.Root).Delete("acme");
+        AuthFixtures.NewTokenStore(Config.Root).Delete("acme");
 
-        await Assert.That(await new TokenStore(Config.Root).LoadAsync("acme")).IsNull();
-        await Assert.That((await new TokenStore(Config.Root).LoadAsync("contoso"))!.GitHubUsername).IsEqualTo("bob");
+        await Assert.That(await AuthFixtures.NewTokenStore(Config.Root).LoadAsync("acme")).IsNull();
+        await Assert.That((await AuthFixtures.NewTokenStore(Config.Root).LoadAsync("contoso"))!.GitHubUsername).IsEqualTo("bob");
     }
 
     [Test]
     public async Task SaveAsync_with_invalid_profile_name_throws() {
-        await Assert.That(async () => await new TokenStore(Config.Root).SaveAsync("../evil", MakeTokens("x")))
+        await Assert.That(async () => await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("../evil", MakeTokens("x")))
             .Throws<ArgumentException>();
 
-        await Assert.That(async () => await new TokenStore(Config.Root).SaveAsync("", MakeTokens("x")))
+        await Assert.That(async () => await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("", MakeTokens("x")))
             .Throws<ArgumentException>();
 
-        await Assert.That(async () => await new TokenStore(Config.Root).SaveAsync("has/slash", MakeTokens("x")))
+        await Assert.That(async () => await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("has/slash", MakeTokens("x")))
             .Throws<ArgumentException>();
     }
 
@@ -102,7 +102,7 @@ public class TokenStoreProfileTests {
         var corrupt = valid + ",\"provider\":\"workos\"}"; // complete object, then stray comma + tail (the customer's signature)
         await File.WriteAllTextAsync(Path.Combine(TokensDir, "acme.json"), corrupt);
 
-        var loaded = await new TokenStore(Config.Root).LoadAsync("acme");
+        var loaded = await AuthFixtures.NewTokenStore(Config.Root).LoadAsync("acme");
 
         await Assert.That(loaded).IsNull();
     }
@@ -112,7 +112,7 @@ public class TokenStoreProfileTests {
         Directory.CreateDirectory(TokensDir);
         await File.WriteAllTextAsync(Path.Combine(TokensDir, "acme.json"), "");
 
-        await Assert.That(await new TokenStore(Config.Root).LoadAsync("acme")).IsNull();
+        await Assert.That(await AuthFixtures.NewTokenStore(Config.Root).LoadAsync("acme")).IsNull();
     }
 
     [Test]
@@ -121,7 +121,7 @@ public class TokenStoreProfileTests {
         await File.WriteAllTextAsync(LegacyPath, "{\"access_token\":\"x\"},garbage");
 
         // No per-profile file exists, so the default profile falls back to the legacy path.
-        await Assert.That(await new TokenStore(Config.Root).LoadForProfileAsync(ProfileConfig.DefaultName)).IsNull();
+        await Assert.That(await AuthFixtures.NewTokenStore(Config.Root).LoadForProfileAsync(ProfileConfig.DefaultName)).IsNull();
     }
 
     [Test]
@@ -131,7 +131,7 @@ public class TokenStoreProfileTests {
         var valid   = System.Text.Json.JsonSerializer.Serialize(MakeTokens("alice"), CapacitorJsonContext.Default.StoredTokens);
         await File.WriteAllTextAsync(Path.Combine(TokensDir, "default.json"), valid + ",\"x\":1}");
 
-        await Assert.That(await new TokenStore(Config.Root).GetValidTokensForProfileAsync(ProfileConfig.DefaultName)).IsNull();
+        await Assert.That(await AuthFixtures.NewTokenStore(Config.Root).GetValidTokensForProfileAsync(ProfileConfig.DefaultName)).IsNull();
     }
 
     [Test]
@@ -142,17 +142,17 @@ public class TokenStoreProfileTests {
         var shortTok = MakeTokens("bob")   with { AccessToken = "gho_short" };
 
         var writers = Enumerable.Range(0, 64)
-            .Select(i => new TokenStore(Config.Root).SaveAsync("race", i % 2 == 0 ? longTok : shortTok));
+            .Select(i => AuthFixtures.NewTokenStore(Config.Root).SaveAsync("race", i % 2 == 0 ? longTok : shortTok));
         await Task.WhenAll(writers);
 
         // Whoever wrote last wins, but the file must always be a single complete document.
-        var loaded = await new TokenStore(Config.Root).LoadAsync("race");
+        var loaded = await AuthFixtures.NewTokenStore(Config.Root).LoadAsync("race");
         await Assert.That(loaded).IsNotNull();
     }
 
     [Test]
     public async Task SaveAsync_leaves_no_temp_residue() {
-        await new TokenStore(Config.Root).SaveAsync("acme", MakeTokens("alice"));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("acme", MakeTokens("alice"));
 
         var stray = Directory.EnumerateFiles(TokensDir, "*.tmp").ToArray();
         await Assert.That(stray).IsEmpty();
@@ -170,7 +170,7 @@ public class TokenStoreProfileTests {
         var valid = System.Text.Json.JsonSerializer.Serialize(MakeTokens("active"), CapacitorJsonContext.Default.StoredTokens);
         await File.WriteAllTextAsync(Path.Combine(TokensDir, "default.json"), valid + ",\"x\":1}");
 
-        await Assert.That(await new TokenStore(Config.Root).LoadForProfileAsync(ProfileConfig.DefaultName)).IsNull();
+        await Assert.That(await AuthFixtures.NewTokenStore(Config.Root).LoadForProfileAsync(ProfileConfig.DefaultName)).IsNull();
     }
 
     [Test]
@@ -182,7 +182,7 @@ public class TokenStoreProfileTests {
             LegacyPath,
             System.Text.Json.JsonSerializer.Serialize(MakeTokens("legacy"), CapacitorJsonContext.Default.StoredTokens));
 
-        var loaded = await new TokenStore(Config.Root).LoadForProfileAsync(ProfileConfig.DefaultName);
+        var loaded = await AuthFixtures.NewTokenStore(Config.Root).LoadForProfileAsync(ProfileConfig.DefaultName);
 
         await Assert.That(loaded).IsNotNull();
         await Assert.That(loaded!.GitHubUsername).IsEqualTo("legacy");
@@ -196,7 +196,7 @@ public class TokenStoreProfileTests {
         await File.WriteAllTextAsync(Path.Combine(TokensDir, "default.json"), "{}");
         await File.WriteAllTextAsync(Path.Combine(TokensDir, "default.json.999.deadbeef.tmp"), "secret");
 
-        await new TokenStore(Config.Root).DeleteAsync();
+        await AuthFixtures.NewTokenStore(Config.Root).DeleteAsync();
 
         await Assert.That(Directory.EnumerateFiles(TokensDir, "*.tmp").Any()).IsFalse();
     }
@@ -208,7 +208,7 @@ public class TokenStoreProfileTests {
         await File.WriteAllTextAsync(Path.Combine(TokensDir, "acme.json.1.aaaa.tmp"), "secret");
         await File.WriteAllTextAsync(Path.Combine(TokensDir, "contoso.json.2.bbbb.tmp"), "other");
 
-        new TokenStore(Config.Root).Delete("acme");
+        AuthFixtures.NewTokenStore(Config.Root).Delete("acme");
 
         await Assert.That(File.Exists(Path.Combine(TokensDir, "acme.json.1.aaaa.tmp"))).IsFalse();
         await Assert.That(File.Exists(Path.Combine(TokensDir, "contoso.json.2.bbbb.tmp"))).IsTrue();
@@ -222,7 +222,7 @@ public class TokenStoreProfileTests {
         Directory.CreateDirectory(Path.Combine(TokensDir, "blocked.json"));
 
         var threw = false;
-        try { await new TokenStore(Config.Root).SaveAsync("blocked", MakeTokens("x")); }
+        try { await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("blocked", MakeTokens("x")); }
         catch { threw = true; }
 
         await Assert.That(threw).IsTrue();
@@ -233,7 +233,7 @@ public class TokenStoreProfileTests {
     public async Task SaveAsync_sets_owner_only_file_mode_on_unix() {
         if (OperatingSystem.IsWindows()) return; // Unix file-mode behavior only
 
-        await new TokenStore(Config.Root).SaveAsync("acme", MakeTokens("alice"));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("acme", MakeTokens("alice"));
 
         var mode = File.GetUnixFileMode(Path.Combine(TokensDir, "acme.json"));
         await Assert.That(mode).IsEqualTo(UnixFileMode.UserRead | UnixFileMode.UserWrite);

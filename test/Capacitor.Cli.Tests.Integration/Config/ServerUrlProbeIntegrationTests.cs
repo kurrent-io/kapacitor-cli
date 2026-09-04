@@ -11,6 +11,9 @@ namespace Capacitor.Cli.Tests.Integration.Config;
 /// (here, WireMock) and resolves the scheme correctly.
 /// </summary>
 public class ServerUrlProbeIntegrationTests : IDisposable {
+    static readonly Func<string, TimeSpan, CancellationToken, Task<bool>> Probe =
+        ServerUrlNormalizer.ProbeWith(new FixedCapacitorHttpClient());
+
     readonly WireMockServer _server = WireMockServer.Start();
 
     public void Dispose() => _server.Stop();
@@ -23,7 +26,8 @@ public class ServerUrlProbeIntegrationTests : IDisposable {
         var port  = new Uri(_server.Url!).Port;
         var input = $"localhost:{port}";
 
-        var result = await ServerUrlNormalizer.NormalizeAsync(input, skipProbe: false, CancellationToken.None);
+        var result = await ServerUrlNormalizer.NormalizeAsync(
+            input, skipProbe: false, CancellationToken.None, Probe);
 
         await Assert.That(result.Url).IsEqualTo($"http://localhost:{port}");
         await Assert.That(result.Warning).IsNull();
@@ -37,7 +41,8 @@ public class ServerUrlProbeIntegrationTests : IDisposable {
         var result = await ServerUrlNormalizer.NormalizeAsync(
             _server.Url!,
             skipProbe: false,
-            CancellationToken.None
+            CancellationToken.None,
+            Probe
         );
 
         await Assert.That(result.Url).IsEqualTo(_server.Url!.TrimEnd('/'));
@@ -55,7 +60,8 @@ public class ServerUrlProbeIntegrationTests : IDisposable {
         var result = await ServerUrlNormalizer.NormalizeAsync(
             input,
             skipProbe: false,
-            CancellationToken.None
+            CancellationToken.None,
+            Probe
         );
 
         await Assert.That(result.Url).IsEqualTo("http://127.0.0.1:1");

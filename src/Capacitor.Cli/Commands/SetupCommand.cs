@@ -26,6 +26,9 @@ using Spectre.Console;
 using Spectre.Console.Rendering;
 using Profile = Capacitor.Cli.Core.Config.Profile;
 
+using Capacitor.Cli.Core.Http;
+using Microsoft.Extensions.DependencyInjection;
+
 namespace Capacitor.Cli.Commands;
 
 /// <summary>Setup's step-scoped rendering of façade output: setup owns the guidance tail, while the
@@ -228,6 +231,7 @@ sealed class SetupImportLane(
         ConfigRoot config,
         ProfileContext profiles,
         UserHome home,
+        ICapacitorHttpClient http,
         HarnessPaths paths,
         Func<SetupImportLane.Pass, Task<ImportCommand.ImportRunOutcome?>>? runner = null) : IFirstRunImportLane {
     /// <summary>One invocation's arguments, so a test can assert what each level asked for without
@@ -244,7 +248,7 @@ sealed class SetupImportLane(
         ImportCommand.ImportDiscoveryResult? found = null;
 
         // Quiet, because the caller owns the terminal for the duration and the figures go to a screen.
-        var exit = await new ImportCommand(config, profiles, home).HandleImport(
+        var exit = await new ImportCommand(config, profiles, home, http).HandleImport(
             filterCwd:    null,
             sources:      SetupCommand.BuildImportSources(config, paths, vendors),
             discoverOnly: true,
@@ -297,7 +301,7 @@ sealed class SetupImportLane(
     async Task<ImportCommand.ImportRunOutcome?> Run(Pass pass) {
         ImportCommand.ImportRunOutcome? outcome = null;
 
-        await new ImportCommand(config, profiles, home).HandleImport(
+        await new ImportCommand(config, profiles, home, http).HandleImport(
             filterCwd:          null,
             sources:            SetupCommand.BuildImportSources(config, paths, pass.Vendors),
             since:              pass.Since,
@@ -404,7 +408,11 @@ sealed class SetupMachineActions : IFirstRunMachineActions {
     }
 }
 
-public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBrowserLauncher browser, UserHome home) {
+public sealed class SetupCommand(
+        ConfigRoot config, ProfileContext profiles, TokenStore store, IHttpClientFactory httpFactory,
+        IAuthProxyClient proxy, WorkOSClient workos, GitHubOAuthClient github, IBrowserLauncher browser,
+        UserHome home, ICapacitorHttpClient http, TenantProvisioningClient provisioning,
+        AuthProviderDiscovery discovery) {
     readonly HarnessPaths _paths = HarnessPaths.FromEnvironment(home);
 
     public async Task<int> HandleAsync(string[] args) {
@@ -498,7 +506,7 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
         // Check if already configured
         var activeProfile  = profile.ActiveName;
         var existing       = profile.Profiles.GetValueOrDefault(activeProfile);
-        var existingTokens = await new TokenStore(config).LoadAsync(activeProfile);
+        var existingTokens = await store.LoadAsync(activeProfile);
 
         if (existing?.ServerUrl is not null && existingTokens is not null && !noPrompt) {
             var rerun = AnsiConsole.Prompt(
@@ -900,13 +908,15 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
         // carries what this run actually chose.
         if (browserAnswers.FlowId is { } browserFlowId) {
             try {
-                // Through the same authenticated choke point the leg uses. Every flow route is
-                // authenticated, and a poll that 401s answers an empty body — indistinguishable from
-                // nothing having been asked — so an unusable client here enables nothing, silently.
-                var (deferredHttp, deferredAuth) = await HttpClientExtensions.CreateClientWithAuthStatusAsync(
-                    config, saved, serverUrl, autoRetryUnauthorized: true);
+                // Every flow route is authenticated, and a poll that 401s answers an empty body —
+                // indistinguishable from nothing having been asked — so an unusable client here
+                // enables nothing, silently.
+                await using var scoped = HttpForChosenServer(serverUrl, saved);
 
-                using var deferred = deferredHttp;
+                var (deferred, deferredAuth) =
+                    await scoped.GetRequiredService<ICapacitorHttpClient>().ForHookAsync();
+
+                using var _ = deferred;
 
                 // The status is the point of the factory: it hands back a client either way, and an
                 // expired or missing token leaves one that cannot poll. Checked rather than assumed, or
@@ -930,7 +940,7 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
             }
         }
 
-        var finalTokens = await new TokenStore(config).LoadAsync(activeName);
+        var finalTokens = await store.LoadAsync(activeName);
 
         // tell the server this user has finished CLI setup, so the dashboard
         // can flip the new-tenant welcome modal from "Waiting for CLI to register"
@@ -961,7 +971,7 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
         // Server-scoped: the import step is only actually authorized if the token both refreshes
         // and belongs to the server we just configured.
         var authSatisfied = await IsAuthSatisfiedAsync(
-            provider, async () => (await new TokenStore(config).GetValidTokensForServerAsync(activeName, serverUrl)).Tokens is not null);
+            provider, async () => (await store.GetValidTokensForServerAsync(activeName, serverUrl)).Tokens is not null);
 
         await RunImportStepAsync(
             currentRepo, authSatisfied, skipImport, noPrompt,
@@ -1229,8 +1239,30 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
     /// </summary>
     internal static Func<ImportInvocation, Task<int>>? ImportRunnerOverride;
 
-    Task<int> DefaultImportRunner(ImportInvocation inv) =>
-        new ImportCommand(config, inv.Profiles, home).HandleImport(
+    /// <summary>
+    /// A client aimed at the server THIS run chose. The process container resolved its server once
+    /// at startup — before this command could pick one, and null on a first run — so every leg that
+    /// runs after the choice has to build its own or it authenticates against the wrong server, or
+    /// against none at all. The profile name and config root stay the process's, so the token lookup
+    /// targets the profile it always did.
+    /// </summary>
+    internal ServiceProvider HttpForChosenServer(string serverUrl, ProfileContext? chosen = null) {
+        var context = chosen ?? new ProfileContext(profiles.Resolution with { ServerUrl = serverUrl }, profiles.Snapshot);
+
+        return new ServiceCollection()
+            .AddSingleton(config)
+            .AddSingleton(context)
+            .AddSingleton(new CapacitorServer(serverUrl, config, context))
+            .AddCapacitorHttp()
+            .BuildServiceProvider();
+    }
+
+    async Task<int> DefaultImportRunner(ImportInvocation inv) {
+        await using var scoped = HttpForChosenServer(inv.Profiles.Resolution.ServerUrl ?? "", inv.Profiles);
+
+        return await new ImportCommand(
+                config, inv.Profiles, home, scoped.GetRequiredService<ICapacitorHttpClient>())
+            .HandleImport(
             filterCwd:               null,
             filterSession:           null,
             minLines:                15,
@@ -1247,6 +1279,7 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
             autoSkipExclusions:      inv.AutoSkipExclusions,
             defaultVisibility:       inv.DefaultVisibility,
             nested:                  true);
+    }
 
     /// <summary>
     /// Every import source, one per catalogue vendor.
@@ -1287,7 +1320,7 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
     async Task<(string ServerUrl, string Provider)?> ResolveServerAndProviderAsync(string serverArg) {
         var normalized = await AnsiConsole.Status().Spinner(Spinner.Known.Dots).StartAsync("Checking server…",
             async _ => await ServerUrlNormalizer.NormalizeAsync(
-                serverArg, skipProbe: false, CancellationToken.None));
+                serverArg, skipProbe: false, CancellationToken.None, ServerUrlNormalizer.ProbeWith(http)));
 
         if (!normalized.Reachable) {
             AnsiConsole.MarkupLine($"  [red]✗[/] Cannot reach server: {Markup.Escape(normalized.Warning ?? serverArg)}");
@@ -1303,7 +1336,7 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
             AnsiConsole.MarkupLine($"  [yellow]![/] {Markup.Escape(normalized.Warning)}");
 
         try {
-            var provider = await HttpClientExtensions.DiscoverProviderAsync(serverUrl, config, profiles);
+            var provider = await discovery.DiscoverAsync(serverUrl, config, profiles, store);
             AnsiConsole.MarkupLine("  [green]✓[/] Reachable");
 
             return (serverUrl, provider);
@@ -1321,7 +1354,8 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
     OnboardingFacade NewFacade(
             ITenantProvisioner? provisioner, ITenantPicker? picker = null, RequestedWorkspace? requested = null) =>
         FacadeOverride?.Invoke(provisioner)
-            ?? new OnboardingFacade(config, StepProgress, browser, picker ?? DefaultPicker(browser, () => true), provisioner,
+            ?? new OnboardingFacade(config, store, httpFactory, proxy, github, workos, StepProgress, browser,
+                picker ?? DefaultPicker(browser, () => true), provisioner,
                 WorkspaceGuard(requested)) {
                 KeyWatcher = ConsoleKeyWatcher.Instance
             };
@@ -1373,7 +1407,7 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
             // other provider's discovery reports a tenant count and no identity, so this is its only one.
             if (provider != AuthProvider.WorkOS) {
                 var cfgAfter = await AppConfig.LoadProfileConfig(config);
-                var tokens   = await new TokenStore(config).LoadAsync(cfgAfter.ActiveProfile);
+                var tokens   = await store.LoadAsync(cfgAfter.ActiveProfile);
                 AnsiConsole.MarkupLine($"  [green]✓[/] Logged in as [cyan]{Markup.Escape(tokens?.GitHubUsername ?? "?")}[/]");
             }
 
@@ -1473,11 +1507,14 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
         // recovered rather than ending a wait that can outlive a short-lived WorkOS token. The try
         // keeps the leg's "no reachable failure crashes setup" promise whole.
         try {
-            var (http, authStatus) = await HttpClientExtensions.CreateClientWithAuthStatusAsync(
-                config, profiles, serverUrl, autoRetryUnauthorized: true);
+            await using var scoped = HttpForChosenServer(serverUrl);
 
-            using (http) {
-                http.Timeout = BrowserFlowHttpTimeout;
+            var flowHttp = scoped.GetRequiredService<ICapacitorHttpClient>();
+
+            var (client, authStatus) = await flowHttp.ForHookAsync();
+
+            using (client) {
+                client.Timeout = BrowserFlowHttpTimeout;
 
                 // Ok runs the leg. NoAuthRequired is the None-provider skip again — silent, for the
                 // same reason. The rest get one line: the factory's quiet variant prints nothing, and
@@ -1499,12 +1536,12 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
                     config, HarnessRegistry.FromEnvironment(home),
                     Environment.MachineName, await LoginShellFindsCliAsync());
 
-                importing = new SetupImportLane(config, ImportContext(profiles, serverUrl), home, _paths);
+                importing = new SetupImportLane(config, ImportContext(profiles, serverUrl), home, flowHttp, _paths);
 
                 using var progress = new SpectreFirstRunFlowProgress();
 
                 result = await new BrowserFirstRunFlow(
-                        new FirstRunFlowClient(http), progress, browser,
+                        new FirstRunFlowClient(client), progress, browser,
                         actions:   new SetupMachineActions(),
                         importing: importing)
                     .RunAsync(serverUrl, report, CancellationToken.None);
@@ -1736,7 +1773,7 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
 
         var provisioner = chosen == AuthProvider.WorkOS
             ? new SpectreTenantProvisioner(
-                new TenantProvisioningClient(new HttpClient()), ProvisioningEndpoint.Url,
+                provisioning, ProvisioningEndpoint.Url,
                 isInteractive: () => canPrompt, requested: requested)
             : null;
 
@@ -1839,21 +1876,17 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
         return Directory.Exists(repoPlugin) ? repoPlugin : null;
     }
 
-    // best-effort signal to the server that this user has completed CLI setup.
-    // Silently swallows network/auth/server errors: the welcome-modal nudge is a UX
-    // affordance, not part of the contract of `kcap setup`.
+    // Best-effort signal that this user finished CLI setup; every failure is swallowed, because
+    // the welcome-modal nudge is not part of what `kcap setup` promises.
     //
-    // Two reliability rules (kcap-cli#113 review):
-    //   • Don't use HttpClientExtensions.CreateAuthenticatedClientAsync — its
-    //     TokenStore.GetValidTokensAsync refresh path makes HTTP calls that
-    //     don't honor a CancellationToken and can block far longer than any
-    //     CTS-based timeout. The user just logged in moments ago in this same
-    //     command, so a non-expired token is the expected case; if it's
-    //     missing or expired we silently skip rather than triggering a refresh.
-    //   • Cap the operation with Task.WhenAny(ping, Task.Delay(5s)) so the
-    //     wall-clock bound is enforced independently of what HttpClient does
-    //     internally. If the delay wins, HttpClient disposal on method-exit
-    //     cancels the in-flight POST.
+    // Two reliability rules:
+    //   • Take a lane that cannot refresh. A refresh makes HTTP calls that honour no
+    //     CancellationToken and can block far past any CTS timeout. The user logged in moments
+    //     ago in this same command, so a live token is the expected case; a missing or expired
+    //     one skips silently rather than triggering one.
+    //   • Cap the operation with Task.WhenAny(ping, Task.Delay(5s)), so the wall-clock bound holds
+    //     independently of what HttpClient does internally. If the delay wins, disposal on
+    //     method-exit cancels the in-flight POST.
     /// <summary>
     /// The cli-setup ping body, hand-built on purpose. A typed DTO here would inherit
     /// CapacitorJsonContext's global SnakeCaseLower policy and serialise <c>cli_version</c>,
@@ -1890,7 +1923,7 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
         }
 
         try {
-            var tokens = await new TokenStore(config).LoadAsync(profile);
+            var tokens = await store.LoadAsync(profile);
             if (tokens is null || tokens.IsExpired) {
                 Debug(tokens is null ? "skipped — no stored token" : "skipped — token expired");
 
@@ -1906,8 +1939,8 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
                 return;
             }
 
-            using var http = new HttpClient();
-            http.DefaultRequestHeaders.Authorization = new("Bearer", tokens.AccessToken);
+            using var client = http.Bearer();
+            client.DefaultRequestHeaders.Authorization = new("Bearer", tokens.AccessToken);
 
             var version = typeof(SetupCommand).Assembly.GetName().Version?.ToString();
             var payload = new StringContent(
@@ -1915,7 +1948,7 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
                 System.Text.Encoding.UTF8,
                 "application/json");
 
-            var pingTask = http.PostAsync($"{serverUrl.TrimEnd('/')}/api/users/me/cli-setup", payload);
+            var pingTask = client.PostAsync($"{serverUrl.TrimEnd('/')}/api/users/me/cli-setup", payload);
             var winner   = await Task.WhenAny(pingTask, Task.Delay(TimeSpan.FromSeconds(5)));
 
             if (winner == pingTask) {
@@ -1924,9 +1957,8 @@ public sealed class SetupCommand(ConfigRoot config, ProfileContext profiles, IBr
                 using var resp = await pingTask;
                 Debug($"{(int)resp.StatusCode} {resp.StatusCode} (provider={tokens.Provider})");
             } else {
-                // Wall-clock cap hit. HttpClient.Dispose() at method-exit
-                // cancels the in-flight POST; observe the orphan so its
-                // cancellation exception doesn't go unhandled.
+                // Wall-clock cap hit. Disposing the client at method-exit cancels the in-flight
+                // POST; observe the orphan so its cancellation exception doesn't go unhandled.
                 Debug("timed out after 5s");
                 _ = pingTask.ContinueWith(
                     t => {

@@ -149,6 +149,7 @@ public class OpenCodeHostedLaunchTests {
 
     sealed class StubServerConnection() : ServerConnection(
         new() { Name = "test", ServerUrl = "http://127.0.0.1:1" },
+        UnusedTokenStore.Create(),
         Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance,
         Microsoft.Extensions.Logging.Abstractions.NullLogger<ServerConnection>.Instance);
 }

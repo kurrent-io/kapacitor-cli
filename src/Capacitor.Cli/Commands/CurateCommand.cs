@@ -1,14 +1,15 @@
-using System.Net;
-using System.Text.Json;
 using Capacitor.Cli.Core;
-using Capacitor.Cli.Core.Config;
 using Capacitor.Cli.Core.Curation;
+using Capacitor.Cli.Core.Http;
 
 namespace Capacitor.Cli.Commands;
 
-class CurateCommand(ConfigRoot config, ProfileContext profiles) {
+class CurateCommand(ConfigRoot config, IRepositoriesApi repositories) {
+    /// <summary>One page is all this command reads; hitting it exactly is what the warning below
+    /// reports, so the request and the check must name the same number.</summary>
+    const int PageLimit = 100;
+
     public async Task<int> HandleApply(bool dryRun, bool yes) {
-        var baseUrl = profiles.Resolution.ServerUrl!;
         var cwd = Environment.CurrentDirectory;
 
         // 1. Authoritative repo-root gate (never AppConfig.RepoRoot).
@@ -27,44 +28,24 @@ class CurateCommand(ConfigRoot config, ProfileContext profiles) {
         var hash = RepoHashHelper.ComputeRepoHash(repo.Owner, repo.RepoName);
 
         // 3. Fetch promoted curation decisions.
-        using var client = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
-        HttpResponseMessage resp;
+        CurationResult curation;
         try {
-            resp = await client.GetWithRetryAsync(
-                $"{baseUrl}/api/repositories/{hash}/curation?status=promoted&minWeight=1&limit=100");
-        } catch (HttpRequestException ex) {
-            HttpClientExtensions.WriteUnreachableError(baseUrl, ex);
+            curation = await repositories.GetPromotedCurationAsync(hash, PageLimit);
+        } catch (CapacitorApiException ex) {
+            await Console.Error.WriteLineAsync(ex.Message);
             return 1;
         }
 
-        if (await HttpClientExtensions.HandleUnauthorizedAsync(resp)) return 1;
-        if (resp.StatusCode == HttpStatusCode.NotFound) {
+        if (curation is CurationResult.NotFound) {
             await Console.Error.WriteLineAsync(
                 "Repo not found or not visible for this profile. Check `kcap whoami` / your active profile.");
             return 1;
         }
-        if (!resp.IsSuccessStatusCode) {
-            await Console.Error.WriteLineAsync($"HTTP {(int)resp.StatusCode}");
-            return 1;
-        }
 
-        var json = await resp.Content.ReadAsStringAsync();
-        const string malformedMessage = "Malformed response from server (could not parse curation payload).";
-        CurationApplyResponse? dto;
-        try {
-            dto = JsonSerializer.Deserialize(json, CapacitorJsonContext.Default.CurationApplyResponse);
-        } catch (JsonException) {
-            await Console.Error.WriteLineAsync(malformedMessage);
-            return 1;
-        }
-        if (dto is null) {
-            await Console.Error.WriteLineAsync(malformedMessage);
-            return 1;
-        }
-        var items = dto.Items ?? [];
+        var items = ((CurationResult.Found)curation).Items;
 
-        if (items.Count == 100)
-            await Console.Error.WriteLineAsync("Warning: hit the 100-item page limit; some guidelines may be omitted.");
+        if (items.Count == PageLimit)
+            await Console.Error.WriteLineAsync($"Warning: hit the {PageLimit}-item page limit; some guidelines may be omitted.");
 
         // 4. Keep claude_md targets, normalize text.
         var guidelines = new List<CuratedGuideline>();

@@ -26,7 +26,7 @@ public class PermissionRequestWatcherSelfHealTests {
 
     // One manager over that root and the URL these spawns target — the two values production hands
     // it, so a watcher here can never point at a second server.
-    static readonly WatcherManager Watchers = new(Root, Resolutions.At("http://localhost:0", Root));
+    static readonly WatcherManager Watchers = new(Root, Resolutions.At("http://localhost:0", Root), new FixedCapacitorHttpClient());
 
     static string? _previousWatcherDir;
 
@@ -61,7 +61,7 @@ public class PermissionRequestWatcherSelfHealTests {
             ["cwd"]             = "/tmp/test"
         };
 
-        await new PermissionRequestCommand(Root, Resolutions.At("http://localhost:0", Root)).TryEnsureWatcher(sessionId, node);
+        await new PermissionRequestCommand(Root, Resolutions.At("http://localhost:0", Root), new FixedCapacitorHttpClient()).TryEnsureWatcher(sessionId, node);
 
         await Assert.That(File.Exists(pidFile)).IsTrue();
         var lines = await File.ReadAllLinesAsync(pidFile);
@@ -81,7 +81,7 @@ public class PermissionRequestWatcherSelfHealTests {
             ["agent_id"]        = "agent-123"
         };
 
-        await new PermissionRequestCommand(Root, Resolutions.At("http://localhost:0", Root)).TryEnsureWatcher(sessionId, node);
+        await new PermissionRequestCommand(Root, Resolutions.At("http://localhost:0", Root), new FixedCapacitorHttpClient()).TryEnsureWatcher(sessionId, node);
 
         await Assert.That(File.Exists(pidFile)).IsFalse();
 
@@ -96,7 +96,7 @@ public class PermissionRequestWatcherSelfHealTests {
             ["cwd"] = "/tmp/test"
         };
 
-        await new PermissionRequestCommand(Root, Resolutions.At("http://localhost:0", Root)).TryEnsureWatcher(sessionId, node);
+        await new PermissionRequestCommand(Root, Resolutions.At("http://localhost:0", Root), new FixedCapacitorHttpClient()).TryEnsureWatcher(sessionId, node);
 
         await Assert.That(File.Exists(pidFile)).IsFalse();
 

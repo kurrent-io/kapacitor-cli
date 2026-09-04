@@ -2,6 +2,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization.Metadata;
+using Capacitor.Cli.Core.Http;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Capacitor.Cli.Commands;
 
@@ -29,17 +31,22 @@ static class McpReviewContextServer {
             return 2;
         }
 
-        // Deliberately uninstrumented, unlike its eight siblings: this sidecar's whole contract
-        // (see the class comment) is that it reaches nothing but its one capability URL and
-        // writes nothing to KCAP_CONFIG_DIR. Telemetry needs both — a persisted device id on
-        // disk and an outbound POST to the analytics endpoint — so wiring it here previously
-        // broke borrowed-review's sandboxed-egress and no-config-authority guarantees at once.
-        // Enforced by McpReviewContextServerIntegrationTests
-        // .Daemon_context_mode_starts_without_backend_and_performs_one_exact_get — don't add it
-        // back without re-reading why that test asserts an empty config dir.
+        // Uninstrumented, unlike its eight siblings: this sidecar reaches nothing but its one
+        // capability URL and writes nothing to KCAP_CONFIG_DIR, and telemetry needs both — a device
+        // id persisted to disk and an outbound POST to the analytics endpoint. Enforced by
+        // McpReviewContextServerIntegrationTests
+        // .Daemon_context_mode_starts_without_backend_and_performs_one_exact_get, which asserts the
+        // config directory is still empty after a tool call.
+        //
+        // The loopback lane for the same reason it exists at all: the URL is the credential, so the
+        // request must follow no redirect and honour no ambient proxy. This container registers that
+        // lane alone — nothing in it resolves a server, a credential or a profile.
+        using var services = new ServiceCollection().AddCapacitorLoopbackClient().BuildServiceProvider();
 
-        using var handler = new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false };
-        using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
+        using var client = services.GetRequiredService<IHttpClientFactory>()
+            .CreateClient(CapacitorClients.Loopback);
+
+        client.Timeout = TimeSpan.FromSeconds(10);
         var tools = BuildToolsList();
         await using var stdin = Console.OpenStandardInput();
         await using var stdout = Console.OpenStandardOutput();

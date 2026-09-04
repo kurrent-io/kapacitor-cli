@@ -5,6 +5,8 @@ using Capacitor.Cli.Core.Harness.Kiro;
 using Capacitor.Cli.SessionStartMemory;
 using Capacitor.Cli.Core.Harness;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands.Harness;
 
 /// <summary>
@@ -33,9 +35,9 @@ namespace Capacitor.Cli.Commands.Harness;
 /// The raw fragment is written with no JSON envelope and no diagnostics: whatever lands on stdout
 /// becomes conversation context verbatim.
 /// </remarks>
-sealed class KiroHookCommand(ConfigRoot config, ProfileContext profiles, HookClock clock, UserHome home) {
-    readonly WatcherManager  _watchers = new(config, profiles);
-    readonly AgentHookPoster _poster   = new(config, profiles);
+sealed class KiroHookCommand(ConfigRoot config, ProfileContext profiles, HookClock clock, UserHome home, ICapacitorHttpClient http) {
+    readonly WatcherManager  _watchers = new(config, profiles, http);
+    readonly AgentHookPoster _poster   = new(config, profiles, http);
 
     string Url => profiles.Resolution.ServerUrl!;
 
@@ -88,7 +90,7 @@ sealed class KiroHookCommand(ConfigRoot config, ProfileContext profiles, HookClo
     /// is skipped rather than letting the shared resolver fall back to the hook PROCESS's cwd and
     /// inject an unrelated repository's memories.</para>
     /// </summary>
-    Task<string?> StartMemoryIndexTask(
+    async Task<string?> StartMemoryIndexTask(
             string     sessionId,
             string?    scopeRoot,
             bool       disabled,
@@ -96,24 +98,21 @@ sealed class KiroHookCommand(ConfigRoot config, ProfileContext profiles, HookClo
             TimeSpan   budget) {
         if ((disabled && guidelinesDisabled) || string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(scopeRoot)
          || budget <= TimeSpan.Zero
-         || !SessionStartMemoryHookSupport.CanAttempt(Url))
-            return Task.FromResult<string?>(null);
+         || !HookHttp.IsPostable(Url))
+            return null;
 
         try {
             var store    = SessionStartMemoryLeaseStore.Create(config, clock.Time);
-            var provider = SessionStartMemoryHookSupport.CompositeProvider(
-                config,
-                SessionStartMemoryHookSupport.ClientFactory(config, profiles, Url),
-                disposeClients: true);
+            var provider = SessionStartMemoryHookSupport.CompositeProvider(config, http.ForBackgroundAsync);
 
-            return new SessionStartMemoryOrchestrator(store, provider).GetFragmentAsync(
+            return await new SessionStartMemoryOrchestrator(store, provider).GetFragmentAsync(
                 new SessionMemoryLifecycle(HarnessId.Kiro, sessionId, LifecycleInstanceId: null,
                     IsTopLevel: true, ClassificationAuthoritative: true,
                     SessionLifecycleReason.RepeatedTurnCallback, CallbackMayRepeat: true),
                 new SessionStartMemoryContextRequest(Url, scopeRoot, disabled, budget, CancellationToken.None,
                     GuidelinesDisabled: guidelinesDisabled));
         } catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException) {
-            return Task.FromResult<string?>(null);
+            return null;
         }
     }
 

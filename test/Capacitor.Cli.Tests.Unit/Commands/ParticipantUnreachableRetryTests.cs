@@ -27,10 +27,10 @@ namespace Capacitor.Cli.Tests.Unit.Commands;
 public class ParticipantUnreachableRetryTests {
     [TempConfigRoot] public required TempConfigRoot Config { get; init; }
 
-    // The dispatch is profile-scoped: its token refresh resolves a profile. These tests exercise
-    // routing, not profile selection.
+    // Resolutions.None: these tests exercise routing, not profile selection.
     McpFlowsServer Server() =>
-        new(Config.Root, Resolutions.None(Config.Root));
+        new(Config.Root, Resolutions.None(Config.Root), AuthFixtures.NewTokenStore(Config.Root),
+            new FixedCapacitorHttpClient());
 
     static VirtualFlowRetryClock Clock() => new();
 
@@ -240,7 +240,7 @@ public class ParticipantUnreachableRetryTests {
         using var client = new HttpClient();
 
         var clock = Clock();
-        using var response = (await Server().SendWithSettlementRetryAsync(
+        using var response = (await McpFlowsServer.SendWithSettlementRetryAsync(
             client, "https://flows.example.test", (c, ct) => c.PostAsync($"{server.Url}/start", null, ct),
             clock, SettlementBackoff.Seeded(11)) as McpFlowsServer.SettlementSendResult.Response)!.Value;
 
@@ -261,7 +261,7 @@ public class ParticipantUnreachableRetryTests {
         using var client = new HttpClient();
 
         var clock = Clock();
-        using var response = (await Server().SendWithSettlementRetryAsync(
+        using var response = (await McpFlowsServer.SendWithSettlementRetryAsync(
             client, "https://flows.example.test", (c, ct) => c.PostAsync($"{server.Url}/rounds", null, ct),
             clock, SettlementBackoff.Seeded(11), extraRetryableCode: McpFlowsServer.ParticipantUnreachableCode)
             as McpFlowsServer.SettlementSendResult.Response)!.Value;
@@ -282,7 +282,7 @@ public class ParticipantUnreachableRetryTests {
         using var client = new HttpClient();
 
         var clock = Clock();
-        using var response = (await Server().SendWithSettlementRetryAsync(
+        using var response = (await McpFlowsServer.SendWithSettlementRetryAsync(
             client, "https://flows.example.test", (c, ct) => c.PostAsync($"{server.Url}/rounds", null, ct),
             clock, SettlementBackoff.Seeded(11), extraRetryableCode: McpFlowsServer.ParticipantUnreachableCode)
             as McpFlowsServer.SettlementSendResult.Response)!.Value;

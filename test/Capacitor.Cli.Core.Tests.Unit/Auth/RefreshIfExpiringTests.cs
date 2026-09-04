@@ -18,7 +18,7 @@ public class RefreshIfExpiringTests {
 
     [Test]
     public async Task NotDue_when_no_tokens_stored() {
-        await Assert.That(await new TokenStore(Config.Root).RefreshIfExpiringAsync(ProfileConfig.DefaultName, Window)).IsEqualTo(ProactiveRefreshOutcome.NotDue);
+        await Assert.That(await AuthFixtures.NewTokenStore(Config.Root).RefreshIfExpiringAsync(ProfileConfig.DefaultName, Window)).IsEqualTo(ProactiveRefreshOutcome.NotDue);
     }
 
     [Test]
@@ -31,25 +31,25 @@ public class RefreshIfExpiringTests {
             GitHubUsername = "alice",
             Provider       = AuthProvider.WorkOS
         };
-        await new TokenStore(Config.Root).SaveAsync("default", original);
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("default", original);
 
-        await Assert.That(await new TokenStore(Config.Root).RefreshIfExpiringAsync(ProfileConfig.DefaultName, Window)).IsEqualTo(ProactiveRefreshOutcome.NotDue);
+        await Assert.That(await AuthFixtures.NewTokenStore(Config.Root).RefreshIfExpiringAsync(ProfileConfig.DefaultName, Window)).IsEqualTo(ProactiveRefreshOutcome.NotDue);
 
         // Untouched — no refresh attempted, so the persisted access token is unchanged.
-        var after = await new TokenStore(Config.Root).LoadAsync("default");
+        var after = await AuthFixtures.NewTokenStore(Config.Root).LoadAsync("default");
         await Assert.That(after!.AccessToken).IsEqualTo("at");
     }
 
     [Test]
     public async Task NotDue_for_none_provider_even_inside_window() {
         // A None-auth server stores no tokens; a stray Provider=None file must still be a no-op.
-        await new TokenStore(Config.Root).SaveAsync("default", new StoredTokens {
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("default", new StoredTokens {
             AccessToken    = "at",
             ExpiresAt      = DateTimeOffset.UtcNow.AddMinutes(1), // inside the window
             GitHubUsername = "alice",
             Provider       = AuthProvider.None
         });
 
-        await Assert.That(await new TokenStore(Config.Root).RefreshIfExpiringAsync(ProfileConfig.DefaultName, Window)).IsEqualTo(ProactiveRefreshOutcome.NotDue);
+        await Assert.That(await AuthFixtures.NewTokenStore(Config.Root).RefreshIfExpiringAsync(ProfileConfig.DefaultName, Window)).IsEqualTo(ProactiveRefreshOutcome.NotDue);
     }
 }

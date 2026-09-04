@@ -1,3 +1,4 @@
+using Capacitor.Cli.Core.Http;
 using Capacitor.Cli.Daemon.Pty;
 using Capacitor.Cli.Daemon.Services;
 using Microsoft.Extensions.DependencyInjection;
@@ -13,7 +14,7 @@ namespace Capacitor.Cli.Daemon.Tests.Unit.Services;
 /// <c>DaemonStatusNotifier?</c> parameter is resolved to the ONE registered singleton only because
 /// its DI registration is a bare <c>AddSingleton&lt;ServerConnection&gt;()</c> — no factory
 /// delegate. If a future change rewrites that registration with a factory that omits the
-/// notifier (e.g. <c>AddSingleton(sp => new ServerConnection(...))</c> without the 4th arg),
+/// notifier (e.g. <c>AddSingleton(sp => new ServerConnection(...))</c> without the 5th arg),
 /// <c>ServerConnection</c> falls back to a private notifier nobody subscribes to and every
 /// hub-state pulse silently stops reaching StatusSubscribe clients — with no other test noticing,
 /// since <see cref="ServerConnection.HubState"/> and every other observable behavior stay correct.
@@ -31,6 +32,7 @@ public class DaemonStatusWiringTests {
         services.AddSingleton(new DaemonConfig { Name = "wiring-test", ServerUrl = "http://127.0.0.1:1" });
         services.AddSingleton<ILoggerFactory>(NullLoggerFactory.Instance);
         services.AddSingleton(typeof(ILogger<>), typeof(NullLogger<>));
+        services.AddSingleton(AuthFixtures.NewTokenStore(Config.Root));
         services.AddSingleton<DaemonStatusNotifier>();
         services.AddSingleton<ServerConnection>();
 
@@ -93,6 +95,7 @@ public class DaemonStatusWiringTests {
         services.AddSingleton<ILoggerFactory>(NullLoggerFactory.Instance);
         services.AddSingleton(typeof(ILogger<>), typeof(NullLogger<>));
         services.AddSingleton(Config.Root);
+        services.AddSingleton(AuthFixtures.NewTokenStore(Config.Root));
         services.AddSingleton<DaemonStatusNotifier>();
         services.AddSingleton(Home.Home);
         services.AddSingleton<ServerConnection>();
@@ -100,6 +103,7 @@ public class DaemonStatusWiringTests {
         services.AddSingleton<RepoMatcher>();
         services.AddSingleton<IPtyProcessFactory>(new NoopPtyProcessFactory());
         services.AddSingleton<IHttpClientFactory>(new NoopHttpClientFactory());
+        services.AddSingleton<ICapacitorHttpClient>(new FixedCapacitorHttpClient());
         services.AddSingleton<LocalPermissionBridge>();
         services.AddSingleton<IReadOnlyDictionary<string, IHostedAgentLauncher>>(
             new Dictionary<string, IHostedAgentLauncher>());

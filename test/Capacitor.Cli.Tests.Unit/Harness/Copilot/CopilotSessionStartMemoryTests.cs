@@ -1,5 +1,6 @@
 using Capacitor.Cli.Commands;
 using Capacitor.Cli.Commands.Harness;
+using Capacitor.Cli.Core;
 using Capacitor.Cli.SessionStartMemory;
 using Microsoft.Extensions.Time.Testing;
 
@@ -85,8 +86,6 @@ public class CopilotSessionStartMemoryTests {
             .IsEqualTo("Unknown");
     }
 
-    // The shared guard protects a process-exiting URL validator (EnsureAbsolute calls
-    // Environment.Exit(2)); asserting the predicate, since tripping the exit would take the host down.
     [Test]
     [Arguments(null)]
     [Arguments("")]
@@ -94,14 +93,14 @@ public class CopilotSessionStartMemoryTests {
     [Arguments("localhost:5108")]
     [Arguments("/relative")]
     public async Task an_unusable_base_url_is_refused_before_auth_discovery(string? baseUrl) {
-        await Assert.That(SessionStartMemoryHookSupport.CanAttempt(baseUrl)).IsFalse();
+        await Assert.That(HookHttp.IsPostable(baseUrl)).IsFalse();
     }
 
     [Test]
     [Arguments("http://localhost:5108")]
     [Arguments("https://kurrent.kcap.ai")]
     public async Task an_absolute_base_url_is_permitted(string baseUrl) {
-        await Assert.That(SessionStartMemoryHookSupport.CanAttempt(baseUrl)).IsTrue();
+        await Assert.That(HookHttp.IsPostable(baseUrl)).IsTrue();
     }
 
     /// <summary>The budget of a Copilot hook that has been running for <paramref name="elapsed"/>.

@@ -18,7 +18,7 @@ namespace Capacitor.Cli.Tests.Unit.Harness.Cursor;
 public class CursorTopLevelStreamingTests {
     [TempHome] public required TempHome Home { get; init; }
 
-    WatchCommand Watch => field ??= new(Config.Root, Resolutions.None(Config.Root), Home);
+    WatchCommand Watch => field ??= new(Config.Root, Resolutions.None(Config.Root), Home, new FixedCapacitorHttpClient(), new FixedCredentialSource());
 
     [TempConfigRoot] public required TempConfigRoot Config { get; init; }
 

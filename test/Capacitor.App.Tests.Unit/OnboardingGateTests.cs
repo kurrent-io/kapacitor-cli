@@ -14,6 +14,8 @@ namespace Capacitor.App.Tests.Unit;
 public class OnboardingGateTests {
     [TempConfigRoot] public required TempConfigRoot Config { get; init; }
 
+    OnboardingGate Gate() => new(Config.Root, AuthFixtures.NewTokenStore(Config.Root));
+
     const string ProfileName = "acme";
     const string ServerUrl = "https://acme.example";
 
@@ -42,7 +44,7 @@ public class OnboardingGateTests {
         // ResolveByName returns Profile: null, ProfileName: null (ProfileResolver.cs:85-96).
         WriteConfig(new ProfileConfig { ActiveProfile = "ghost", Profiles = new() });
 
-        var result = (await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None)).Result;
+        var result = (await Gate().EvaluateAsync(CancellationToken.None)).Result;
 
         await AssertIncomplete(result, GateReason.NoProfile);
     }
@@ -56,7 +58,7 @@ public class OnboardingGateTests {
         Directory.CreateDirectory(Path.GetDirectoryName(ConfigPath)!);
         await File.WriteAllTextAsync(ConfigPath, "{not valid json");
 
-        var result = (await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None)).Result;
+        var result = (await Gate().EvaluateAsync(CancellationToken.None)).Result;
 
         await AssertIncomplete(result, GateReason.InvalidServerUrl);
     }
@@ -67,7 +69,7 @@ public class OnboardingGateTests {
         var profile = new Profile { ServerUrl = fileUrl };
         WriteConfig(SingleProfileConfig(profile));
 
-        var result = (await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None)).Result;
+        var result = (await Gate().EvaluateAsync(CancellationToken.None)).Result;
 
         await AssertIncomplete(result, GateReason.InvalidServerUrl);
 
@@ -82,7 +84,7 @@ public class OnboardingGateTests {
     public async Task No_token_file_yields_NoToken() {
         WriteConfig(SingleProfileConfig(new Profile { ServerUrl = ServerUrl }));
 
-        var result = (await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None)).Result;
+        var result = (await Gate().EvaluateAsync(CancellationToken.None)).Result;
 
         await AssertIncomplete(result, GateReason.NoToken);
     }
@@ -92,10 +94,10 @@ public class OnboardingGateTests {
         // TokenStore.GetValidTokensForProfileAsync (TokenStore.cs:398): WorkOS refreshes only
         // when BOTH RefreshToken and ClientId are present.
         WriteConfig(SingleProfileConfig(new Profile { ServerUrl = ServerUrl }));
-        await new TokenStore(Config.Root).SaveAsync(ProfileName, MakeToken(
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync(ProfileName, MakeToken(
             AuthProvider.WorkOS, expired: true, serverUrl: ServerUrl, refreshToken: "rt", clientId: "cid"));
 
-        var result = (await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None)).Result;
+        var result = (await Gate().EvaluateAsync(CancellationToken.None)).Result;
 
         await Assert.That(result).IsTypeOf<GateResult.Complete>();
     }
@@ -103,10 +105,10 @@ public class OnboardingGateTests {
     [Test]
     public async Task WorkOS_expired_missing_client_id_is_TokenUnusableExpired() {
         WriteConfig(SingleProfileConfig(new Profile { ServerUrl = ServerUrl }));
-        await new TokenStore(Config.Root).SaveAsync(ProfileName, MakeToken(
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync(ProfileName, MakeToken(
             AuthProvider.WorkOS, expired: true, serverUrl: ServerUrl, refreshToken: "rt", clientId: null));
 
-        var result = (await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None)).Result;
+        var result = (await Gate().EvaluateAsync(CancellationToken.None)).Result;
 
         await AssertIncomplete(result, GateReason.TokenUnusableExpired);
     }
@@ -116,9 +118,9 @@ public class OnboardingGateTests {
         // TokenStore.cs:403-405 / DecideProactiveRefresh: GitHubApp always refreshes via the
         // server's /auth/refresh, independent of RefreshToken (normally null for this provider).
         WriteConfig(SingleProfileConfig(new Profile { ServerUrl = ServerUrl }));
-        await new TokenStore(Config.Root).SaveAsync(ProfileName, MakeToken(AuthProvider.GitHubApp, expired: true, serverUrl: ServerUrl));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync(ProfileName, MakeToken(AuthProvider.GitHubApp, expired: true, serverUrl: ServerUrl));
 
-        var result = (await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None)).Result;
+        var result = (await Gate().EvaluateAsync(CancellationToken.None)).Result;
 
         await Assert.That(result).IsTypeOf<GateResult.Complete>();
     }
@@ -128,10 +130,10 @@ public class OnboardingGateTests {
         // TokenStore.BoundToTarget (TokenStore.cs:339-340) is checked BEFORE expiry — an
         // unexpired-but-wrong-server token must still be refused, never silently accepted.
         WriteConfig(SingleProfileConfig(new Profile { ServerUrl = ServerUrl }));
-        await new TokenStore(Config.Root).SaveAsync(ProfileName, MakeToken(
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync(ProfileName, MakeToken(
             AuthProvider.GitHubApp, expired: false, serverUrl: "https://other.example"));
 
-        var result = (await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None)).Result;
+        var result = (await Gate().EvaluateAsync(CancellationToken.None)).Result;
 
         await AssertIncomplete(result, GateReason.TokenUnusableBinding);
     }
@@ -143,9 +145,9 @@ public class OnboardingGateTests {
         // nothing to contradict and is let through to ANY server. The gate must agree, not
         // invent a stricter rule that would strand every pre-upgrade machine behind the wizard.
         WriteConfig(SingleProfileConfig(new Profile { ServerUrl = ServerUrl }));
-        await new TokenStore(Config.Root).SaveAsync(ProfileName, MakeToken(AuthProvider.GitHubApp, expired: false, serverUrl: null));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync(ProfileName, MakeToken(AuthProvider.GitHubApp, expired: false, serverUrl: null));
 
-        var result = (await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None)).Result;
+        var result = (await Gate().EvaluateAsync(CancellationToken.None)).Result;
 
         await Assert.That(result).IsTypeOf<GateResult.Complete>();
     }
@@ -160,7 +162,7 @@ public class OnboardingGateTests {
             CapacitorJsonContext.Default.StoredTokens);
         await File.WriteAllTextAsync(Path.Combine(TokensDir, $"{ProfileName}.json"), valid + ",\"x\":1}");
 
-        var result = (await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None)).Result;
+        var result = (await Gate().EvaluateAsync(CancellationToken.None)).Result;
 
         await AssertIncomplete(result, GateReason.NoToken);
     }
@@ -174,7 +176,7 @@ public class OnboardingGateTests {
         WriteConfig(SingleProfileConfig(profile));
         // Deliberately no tokens/ directory at all — the stamp must short-circuit the token read.
 
-        var result = (await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None)).Result;
+        var result = (await Gate().EvaluateAsync(CancellationToken.None)).Result;
 
         await Assert.That(result).IsTypeOf<GateResult.Complete>();
         await Assert.That(Directory.Exists(TokensDir)).IsFalse();
@@ -189,7 +191,7 @@ public class OnboardingGateTests {
         WriteConfig(SingleProfileConfig(profile));
         // Deliberately no tokens/ directory at all — the stamp must short-circuit the token read.
 
-        var result = (await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None)).Result;
+        var result = (await Gate().EvaluateAsync(CancellationToken.None)).Result;
 
         await Assert.That(result).IsTypeOf<GateResult.Complete>();
         await Assert.That(Directory.Exists(TokensDir)).IsFalse();
@@ -205,7 +207,7 @@ public class OnboardingGateTests {
         };
         WriteConfig(SingleProfileConfig(profile));
 
-        var result = (await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None)).Result;
+        var result = (await Gate().EvaluateAsync(CancellationToken.None)).Result;
 
         await AssertIncomplete(result, GateReason.NoToken);
     }
@@ -218,10 +220,10 @@ public class OnboardingGateTests {
         // RefreshToken/ClientId is TokenUnusableExpired, stamp or no stamp.
         var profile = new Profile { ServerUrl = ServerUrl, AuthProvider = new AuthProviderStamp("workos", ServerUrl) };
         WriteConfig(SingleProfileConfig(profile));
-        await new TokenStore(Config.Root).SaveAsync(ProfileName, MakeToken(
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync(ProfileName, MakeToken(
             AuthProvider.WorkOS, expired: true, serverUrl: ServerUrl, refreshToken: null, clientId: null));
 
-        var result = (await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None)).Result;
+        var result = (await Gate().EvaluateAsync(CancellationToken.None)).Result;
 
         await AssertIncomplete(result, GateReason.TokenUnusableExpired);
     }
@@ -233,9 +235,9 @@ public class OnboardingGateTests {
         // giving it a genuinely valid token and expecting Complete via THAT path, not some
         // stamp-shaped shortcut.
         WriteConfig(SingleProfileConfig(new Profile { ServerUrl = ServerUrl, AuthProvider = null }));
-        await new TokenStore(Config.Root).SaveAsync(ProfileName, MakeToken(AuthProvider.GitHubApp, expired: false, serverUrl: ServerUrl));
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync(ProfileName, MakeToken(AuthProvider.GitHubApp, expired: false, serverUrl: ServerUrl));
 
-        var result = (await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None)).Result;
+        var result = (await Gate().EvaluateAsync(CancellationToken.None)).Result;
 
         await Assert.That(result).IsTypeOf<GateResult.Complete>();
     }
@@ -257,7 +259,7 @@ public class OnboardingGateTests {
         // EvaluateAsync call at this point would see NoProfile instead.
         WriteConfig(new ProfileConfig { ActiveProfile = "ghost", Profiles = new() });
 
-        var result = await new OnboardingGate(Config.Root).EvaluateResolvedAsync(resolved.ProfileName, resolved.Profile, CancellationToken.None);
+        var result = await Gate().EvaluateResolvedAsync(resolved.ProfileName, resolved.Profile, CancellationToken.None);
 
         await Assert.That(result).IsTypeOf<GateResult.Complete>();
     }
@@ -272,7 +274,7 @@ public class OnboardingGateTests {
         // not catch (it handles only missing-file and malformed-JSON).
         Directory.CreateDirectory(Path.Combine(TokensDir, $"{ProfileName}.json"));
 
-        var (result, profiles) = await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None);
+        var (result, profiles) = await Gate().EvaluateAsync(CancellationToken.None);
 
         await AssertIncomplete(result, GateReason.EvaluationFailed);
         await Assert.That(profiles).IsNotNull();

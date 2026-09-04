@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Net;
-using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -10,9 +9,11 @@ using Capacitor.Cli.Core.Auth;
 using Capacitor.Cli.Core.Telemetry;
 using Capacitor.Cli.Core.Config;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands;
 
-sealed class McpSessionsServer(ConfigRoot config, ProfileContext profiles) {
+sealed class McpSessionsServer(ConfigRoot config, ProfileContext profiles, TokenStore tokens, ICapacitorHttpClient http) {
     internal const string NotLoggedInMessage = AuthRejectionNotice.NotLoggedIn;
 
     public async Task<int> RunAsync() {
@@ -26,7 +27,7 @@ sealed class McpSessionsServer(ConfigRoot config, ProfileContext profiles) {
         // "mcp-server" so per-tool-call events actually leave. Best-effort: a stale token on
         // disk must never block the server from starting.
         var loggedIn = false;
-        try { loggedIn = await new TokenStore(config).LoadForProfileAsync(profiles.Name) is not null; } catch { }
+        try { loggedIn = await tokens.LoadForProfileAsync(profiles.Name) is not null; } catch { }
         CliTelemetry.Initialize("mcp-server", baseUrl, loggedIn, config);
 
         // Validate the server_url shape once, locally (pure string check — no network, token,
@@ -44,16 +45,14 @@ sealed class McpSessionsServer(ConfigRoot config, ProfileContext profiles) {
         HttpClient? client = null;
 
         // Guarded tool dispatch: never let the stdio JSON-RPC loop die on one bad request. An
-        // unusable server_url would otherwise reach EnsureAbsolute inside the auth-client factory,
-        // which hard-exits the process (Environment.Exit(2)) mid-request; and an unexpected
-        // failure would bubble out of the loop. Return a JSON-RPC tool error in both cases so the
-        // server keeps serving.
+        // unexpected failure would otherwise bubble out of the loop and kill the server mid-protocol;
+        // return a JSON-RPC tool error instead so it keeps serving.
         async Task<string> DispatchToolCallAsync(JsonNode callId, JsonObject callRequest) {
             if (!urlOk)
                 return BuildToolResult(callId, HttpClientExtensions.SchemeMissingHint, isError: true);
 
             try {
-                client ??= await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl, autoRetryUnauthorized: false);
+                client ??= await http.ForSessionAsync();
                 return await HandleToolCallAsync(callId, callRequest, client, baseUrl, await repository.GetHashAsync());
             } catch (Exception ex) {
                 // Unexpected: log the detail to stderr (not to the client, which could leak local
@@ -164,18 +163,18 @@ sealed class McpSessionsServer(ConfigRoot config, ProfileContext profiles) {
 
         try {
             using var httpResponse = toolName switch {
-                "get_session_summary"    => await SendWithRefreshRetryAsync(client, baseUrl, c => c.GetAsync(BuildSummaryUrl(baseUrl, arguments))),
-                "get_session_transcript" => await SendWithRefreshRetryAsync(client, baseUrl, c => c.GetAsync(BuildTranscriptUrl(baseUrl, arguments))),
-                "get_turn"               => await SendWithRefreshRetryAsync(client, baseUrl, c => c.GetAsync(BuildTurnDetailUrl(baseUrl, arguments))),
-                "list_turns"             => await SendWithRefreshRetryAsync(client, baseUrl, c => c.GetAsync(BuildTurnsUrl(baseUrl, arguments))),
-                "list_repo_sessions"     => await SendWithRefreshRetryAsync(client, baseUrl, c => c.GetAsync(BuildRepoSessionsUrl(baseUrl, arguments, cwdRepoHash))),
+                "get_session_summary"    => await client.GetAsync(BuildSummaryUrl(baseUrl, arguments)),
+                "get_session_transcript" => await client.GetAsync(BuildTranscriptUrl(baseUrl, arguments)),
+                "get_turn"               => await client.GetAsync(BuildTurnDetailUrl(baseUrl, arguments)),
+                "list_turns"             => await client.GetAsync(BuildTurnsUrl(baseUrl, arguments)),
+                "list_repo_sessions"     => await client.GetAsync(BuildRepoSessionsUrl(baseUrl, arguments, cwdRepoHash)),
                 _                        => throw new ArgumentException($"Unknown tool: {toolName}")
             };
 
             var body = await httpResponse.Content.ReadAsStringAsync();
 
             if (httpResponse.StatusCode == HttpStatusCode.Unauthorized) {
-                return BuildToolResult(id, await AuthRejectionNotice.ForPersistentUnauthorizedAsync(config, profiles.Name, baseUrl), isError: true);
+                return BuildToolResult(id, await AuthRejectionNotice.ForPersistentUnauthorizedAsync(tokens, profiles.Name, baseUrl), isError: true);
             }
 
             if (!httpResponse.IsSuccessStatusCode) {
@@ -207,11 +206,11 @@ sealed class McpSessionsServer(ConfigRoot config, ProfileContext profiles) {
             string?     cwdRepoHash
         ) {
         try {
-            using var first = await SendWithRefreshRetryAsync(client, baseUrl, c => c.GetAsync(BuildSearchUrl(baseUrl, arguments, cwdRepoHash)));
+            using var first = await client.GetAsync(BuildSearchUrl(baseUrl, arguments, cwdRepoHash));
             var       body  = await first.Content.ReadAsStringAsync();
 
             if (first.StatusCode == HttpStatusCode.Unauthorized) {
-                return BuildToolResult(id, await AuthRejectionNotice.ForPersistentUnauthorizedAsync(config, profiles.Name, baseUrl), isError: true);
+                return BuildToolResult(id, await AuthRejectionNotice.ForPersistentUnauthorizedAsync(tokens, profiles.Name, baseUrl), isError: true);
             }
 
             if (!first.IsSuccessStatusCode) {
@@ -233,7 +232,7 @@ sealed class McpSessionsServer(ConfigRoot config, ProfileContext profiles) {
                     // shared HttpClient's default 100s timeout.
                     using var widenCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
                     var       url      = BuildSearchUrl(baseUrl, widenedArgs, cwdRepoHash);
-                    using var second   = await SendWithRefreshRetryAsync(client, baseUrl, c => c.GetAsync(url, widenCts.Token));
+                    using var second   = await client.GetAsync(url, widenCts.Token);
 
                     if (second.IsSuccessStatusCode) {
                         var widenedBody = await second.Content.ReadAsStringAsync(widenCts.Token);
@@ -251,45 +250,6 @@ sealed class McpSessionsServer(ConfigRoot config, ProfileContext profiles) {
         } catch (HttpRequestException ex) {
             return BuildToolResult(id, $"Error: {ex.Message}", isError: true);
         }
-    }
-
-    /// <summary>
-    /// Sends an HTTP request with one-shot retry on 401. The MCP server reuses a single
-    /// <see cref="HttpClient"/> for the lifetime of the agent session, so a cached token
-    /// that was valid at startup may have expired by the time a tool call is made. On 401
-    /// we ask <see cref="TokenStore.GetValidTokensForProfileAsync"/> for a fresh token (which triggers
-    /// the refresh flow for WorkOS / GitHubApp), update the client's <c>Authorization</c>
-    /// header, and retry the same request once. If refresh fails (genuinely not logged in
-    /// or refresh-token expired), the original 401 is returned and the caller surfaces the
-    /// store-aware <see cref="AuthRejectionNotice"/> line (which keeps the legacy
-    /// "Not logged in" wording only for a genuinely missing login).
-    /// </summary>
-    async Task<HttpResponseMessage> SendWithRefreshRetryAsync(HttpClient client, string baseUrl, Func<HttpClient, Task<HttpResponseMessage>> send) {
-        var response = await send(client);
-
-        if (response.StatusCode != HttpStatusCode.Unauthorized) return response;
-
-        // Force a refresh against the token this client actually sent: the 401 proves the server
-        // rejected it even though it may still look unexpired locally, which a plain load would
-        // not heal. Passing the rejected token also means a peer process that already refreshed is
-        // adopted rather than rotated a second time. With no token attached at all — this MCP
-        // process outlives a `kcap login` that finished after the client was built — there is
-        // nothing to refresh, so just pick up whatever is stored now.
-        var rejected = client.DefaultRequestHeaders.Authorization?.Parameter;
-
-        // A failed rotation must not be worse than no rotation: fall back to whatever is stored so
-        // the pre-existing "re-read and resend once" recovery still happens.
-        var tokens    = new TokenStore(config);
-        var refreshed = rejected is null
-            ? (await tokens.GetValidTokensForServerAsync(profiles.Name, baseUrl)).Tokens
-            : await tokens.RecoverForServerAsync(profiles.Name, baseUrl, rejected);
-
-        if (refreshed is null) return response; // genuinely not logged in; keep the original 401
-
-        response.Dispose();
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", refreshed.AccessToken);
-
-        return await send(client);
     }
 
     const string RepoShapeMessage =

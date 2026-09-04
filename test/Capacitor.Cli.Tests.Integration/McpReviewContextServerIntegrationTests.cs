@@ -31,6 +31,8 @@ public class McpReviewContextServerIntegrationTests {
             await Assert.That(context.Request.HttpMethod).IsEqualTo("GET");
             await Assert.That(context.Request.RawUrl)
                 .IsEqualTo($"/{token}/review-context/workspace-mcp-configs");
+            await Assert.That(context.Request.Headers["Authorization"]).IsNull()
+                .Because("the URL is the whole credential; a lane that attaches a bearer would send one it never read");
             var bytes = Encoding.UTF8.GetBytes(manifest);
             context.Response.ContentType = "application/json";
             context.Response.ContentLength64 = bytes.Length;

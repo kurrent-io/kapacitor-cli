@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using Capacitor.Cli.Core.Commands;
 
 namespace Capacitor.Cli.Core.Auth;
 
@@ -7,6 +8,14 @@ public interface IAuthProxyClient {
     Task<ProxyConfigResponse?> GetConfigAsync(string proxyUrl, CancellationToken ct = default);
     Task<DiscoveryResult>      DiscoverTenantsAsync(string proxyUrl, string githubAccessToken, CancellationToken ct = default);
     Task<DiscoveryResult>      DiscoverWorkOSTenantsAsync(string proxyUrl, string workosAccessToken, CancellationToken ct = default);
+
+    /// <summary>
+    /// Provisions a machine application against the operator's own token. Never throws: the caller
+    /// prints one message per outcome, and an unreadable success body degrades to no application
+    /// rather than to an exception the command has no wording for.
+    /// </summary>
+    Task<MachineProvisioningResult> CreateMachineApplicationAsync(
+        string proxyUrl, string bearer, string name, CancellationToken ct = default);
 
     /// <summary>Asks the proxy to prepare a browser pick. Null on any failure — the caller falls back.</summary>
     Task<CliPickerPrepareResponse?> PreparePickAsync(
@@ -67,6 +76,37 @@ public class AuthProxyClient(HttpClient http) : IAuthProxyClient {
             };
         } catch (Exception e) when (e is HttpRequestException or OperationCanceledException) {
             return new([], DiscoveryError.ProxyUnreachable);
+        }
+    }
+
+    public async Task<MachineProvisioningResult> CreateMachineApplicationAsync(
+            string proxyUrl, string bearer, string name, CancellationToken ct = default) {
+        try {
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"{proxyUrl}/connect/m2m-applications") {
+                Content = JsonContent.Create(
+                    new CreateMachineApplicationRequest(name),
+                    CapacitorJsonContext.Default.CreateMachineApplicationRequest)
+            };
+            request.Headers.Authorization = new("Bearer", bearer);
+
+            using var response = await http.SendAsync(request, ct);
+
+            if (response.StatusCode is HttpStatusCode.Unauthorized) return new(null, MachineProvisioningError.Unauthorized);
+            if (response.StatusCode is HttpStatusCode.Forbidden)    return new(null, MachineProvisioningError.Forbidden);
+
+            if (!response.IsSuccessStatusCode) {
+                return new(null, MachineProvisioningError.Rejected,
+                    (int)response.StatusCode, await response.Content.ReadAsStringAsync(ct));
+            }
+
+            return new(
+                await response.Content.ReadFromJsonAsync(
+                    CapacitorJsonContext.Default.CreateMachineApplicationResponse, ct),
+                MachineProvisioningError.None);
+        } catch (Exception e) when (e is HttpRequestException or OperationCanceledException) {
+            return new(null, MachineProvisioningError.Unreachable, Detail: e.Message);
+        } catch (System.Text.Json.JsonException) {
+            return new(null, MachineProvisioningError.None);
         }
     }
 

@@ -6,6 +6,8 @@ using Capacitor.Cli.Core.Config;
 using Capacitor.Cli.SessionStartMemory;
 using Capacitor.Cli.Core.Harness;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands.Harness;
 
 /// <summary>
@@ -32,9 +34,9 @@ namespace Capacitor.Cli.Commands.Harness;
 /// text, no envelope) for the extension to append to each turn's chained system prompt. Diagnostics go
 /// to stderr. Every other event keeps writing nothing at all.</para>
 /// </summary>
-sealed class PiHookCommand(ConfigRoot config, ProfileContext profiles, HookClock clock, UserHome home) {
-    readonly WatcherManager  _watchers = new(config, profiles);
-    readonly AgentHookPoster _poster   = new(config, profiles);
+sealed class PiHookCommand(ConfigRoot config, ProfileContext profiles, HookClock clock, UserHome home, ICapacitorHttpClient http) {
+    readonly WatcherManager  _watchers = new(config, profiles, http);
+    readonly AgentHookPoster _poster   = new(config, profiles, http);
 
     string Url => profiles.Resolution.ServerUrl!;
 
@@ -308,7 +310,7 @@ sealed class PiHookCommand(ConfigRoot config, ProfileContext profiles, HookClock
         _                  => SessionLifecycleReason.RepeatedTurnCallback
     };
 
-    internal Task<string?> StartMemoryIndexTask(
+    internal async Task<string?> StartMemoryIndexTask(
             string   file,
             string?  scopeRoot,
             bool     disabled,
@@ -317,22 +319,19 @@ sealed class PiHookCommand(ConfigRoot config, ProfileContext profiles, HookClock
             string?  reason = null) {
         if ((disabled && guidelinesDisabled) || string.IsNullOrWhiteSpace(file) || string.IsNullOrWhiteSpace(scopeRoot)
          || budget <= TimeSpan.Zero
-         || !SessionStartMemoryHookSupport.CanAttempt(Url))
-            return Task.FromResult<string?>(null);
+         || !HookHttp.IsPostable(Url))
+            return null;
 
         try {
             var store    = SessionStartMemoryLeaseStore.Create(config, clock.Time);
-            var provider = SessionStartMemoryHookSupport.CompositeProvider(
-                config,
-                SessionStartMemoryHookSupport.ClientFactory(config, profiles, Url),
-                disposeClients: true);
+            var provider = SessionStartMemoryHookSupport.CompositeProvider(config, http.ForBackgroundAsync);
 
-            return new SessionStartMemoryOrchestrator(store, provider).GetFragmentAsync(
+            return await new SessionStartMemoryOrchestrator(store, provider).GetFragmentAsync(
                 LifecycleFor(file, reason),
                 new SessionStartMemoryContextRequest(Url, scopeRoot, disabled, budget, CancellationToken.None,
                     GuidelinesDisabled: guidelinesDisabled));
         } catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException) {
-            return Task.FromResult<string?>(null);
+            return null;
         }
     }
 

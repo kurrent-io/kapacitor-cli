@@ -195,6 +195,7 @@ public static class WorkOSDiscovery {
     /// <summary>Publishes a <see cref="WorkOSDiscoveryFlow.Ready"/> through the ordered commit boundary.</summary>
     internal static async Task<AuthResult> PublishAsync(
             ConfigRoot                                                  root,
+            TokenStore                                                  store,
             WorkOSDiscoveryFlow.Ready                                   ready,
             IAuthProgress                                               progress,
             Func<IReadOnlyList<AuthIdentity>, CancellationToken, Task>? beforeCommit,
@@ -223,7 +224,7 @@ public static class WorkOSDiscovery {
             [new AuthIdentity(picked.ProfileName, canonical)], AuthProvider.WorkOS, picked.ProfileName, canonical,
             ConfigMutation: config => TenantDiscovery.MergeProfiles(config, ready.Tenants, picked),
             PublishTokens: async saved => {
-                await new TokenStore(root).SaveAsync(picked.ProfileName, tokens, CancellationToken.None);
+                await store.SaveAsync(picked.ProfileName, tokens, CancellationToken.None);
                 saved();
 
                 return ready.Username;

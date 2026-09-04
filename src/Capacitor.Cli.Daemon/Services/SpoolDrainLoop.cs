@@ -1,5 +1,5 @@
 using Capacitor.Cli.Core;
-using Capacitor.Cli.Core.Config;
+using Capacitor.Cli.Core.Http;
 using Capacitor.Cli.Core.Harness.Cursor;
 using Microsoft.Extensions.Logging;
 
@@ -29,7 +29,7 @@ namespace Capacitor.Cli.Daemon.Services;
 /// </summary>
 internal sealed class SpoolDrainLoop {
     readonly ConfigRoot                _configRoot;
-    readonly ProfileContext            _profiles;
+    readonly ICapacitorHttpClient      _http;
     readonly string                    _baseUrl;
     readonly HookSpool                 _lifecycle;
     readonly TranscriptSpool           _transcript;
@@ -42,16 +42,16 @@ internal sealed class SpoolDrainLoop {
     static readonly TimeSpan Budget = TimeSpan.FromSeconds(3);
 
     public SpoolDrainLoop(
-            ConfigRoot         configRoot,
-            ProfileContext     profiles,
-            string             baseUrl,
-            HookSpool          lifecycle,
-            TranscriptSpool    transcript,
-            ILogger            logger,
-            Action<string>?    onWhatsDoneRequested = null
+            ConfigRoot           configRoot,
+            ICapacitorHttpClient http,
+            string               baseUrl,
+            HookSpool            lifecycle,
+            TranscriptSpool      transcript,
+            ILogger              logger,
+            Action<string>?      onWhatsDoneRequested = null
         ) {
         _configRoot           = configRoot;
-        _profiles             = profiles;
+        _http                 = http;
         _markers              = new CursorMarkers(configRoot);
         _baseUrl              = baseUrl;
         _lifecycle            = lifecycle;
@@ -70,17 +70,20 @@ internal sealed class SpoolDrainLoop {
             _lifecycle.ReapOlderThan(TimeSpan.FromDays(30));
             _transcript.ReapOlderThan(TimeSpan.FromDays(30));
 
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(Budget);
-
-            var (client, status) = await HttpClientExtensions.CreateClientWithAuthStatusAsync(_configRoot, _profiles, _baseUrl);
+            // Resolved on the loop's own token, not the drain budget: a proactive refresh can take
+            // the cross-process lock and a WorkOS round trip well past Budget, and cutting that off
+            // early would starve LifecycleSpoolDrain.RunAsync of the allowance it is handed below.
+            var (client, status) = await _http.ForHookAsync(ct);
 
             using (client) {
-                if (status is AuthStatus.Expired or AuthStatus.NotAuthenticated or AuthStatus.WrongServer) {
+                if (status is AuthStatus.Expired or AuthStatus.NotAuthenticated or AuthStatus.WrongServer or AuthStatus.UnusableServerUrl) {
                     _logger.LogDebug("Spool-drain tick: auth lapsed — skipping this pass");
 
                     return;
                 }
+
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(Budget);
 
                 await LifecycleSpoolDrain.RunAsync(
                     _markers, client, _baseUrl, _lifecycle, _transcript, currentSessionId: null, Budget, cts.Token,

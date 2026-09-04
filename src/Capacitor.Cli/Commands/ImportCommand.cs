@@ -8,6 +8,7 @@ using Capacitor.Cli.Core.Harness;
 using Capacitor.Cli.Core.Harness.Claude;
 using Capacitor.Cli.Core.Config;
 using Capacitor.Cli.Core.FirstRun;
+using Capacitor.Cli.Core.Http;
 using Capacitor.Cli.Core.RepoEvidence;
 using Capacitor.Cli.Harness.Claude;
 using Capacitor.Cli.Harness.Cursor;
@@ -15,7 +16,8 @@ using Spectre.Console;
 
 namespace Capacitor.Cli.Commands;
 
-class ImportCommand(ConfigRoot config, ProfileContext profiles, UserHome home) {
+class ImportCommand(
+        ConfigRoot config, ProfileContext profiles, UserHome home, ICapacitorHttpClient http) {
     /// <summary>
     /// Maximum parallel worker count for the Importing phase. Both the
     /// channel-based dispatcher in ImportChainsAsync and the TTY slot-row
@@ -755,8 +757,8 @@ class ImportCommand(ConfigRoot config, ProfileContext profiles, UserHome home) {
         // Discovery is a local scan and never touches this client, so building the authenticated one
         // would probe the server and warn an unauthenticated user about a command that needs neither.
         using var httpClient = discoverOnly
-            ? new HttpClient()
-            : await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
+            ? http.Anonymous()
+            : await http.ForCommandAsync();
         var       display    = ImportDisplay.Create(quiet: discoverJson, nested: nested);
 
         // --- Sources ---
@@ -1377,7 +1379,7 @@ class ImportCommand(ConfigRoot config, ProfileContext profiles, UserHome home) {
                             await concurrencyLimit.WaitAsync();
 
                             try {
-                                var rc = await new WhatsDoneCommand(config, profiles, home)
+                                var rc = await new WhatsDoneCommand(config, profiles, home, http)
                                     .GenerateForSessionAsync(baseUrl, sid, _ => { }, vnd.VendorId);
 
                                 if (rc == 0) Interlocked.Increment(ref summariesGenerated);

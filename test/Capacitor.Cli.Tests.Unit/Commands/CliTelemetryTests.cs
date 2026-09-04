@@ -223,7 +223,7 @@ public class CliTelemetryTests {
         await Assert.That(TelemetryDeviceId.ReadPersisted(Config.Root)).IsNotNull();
         await Assert.That(sink.Any(e => e.Name == "cli_first_run")).IsTrue();
 
-        var exit = await new ConfigCommand(Config.Root).HandleAsync(["config", "set", "telemetry", "off"]);
+        var exit = await new ConfigCommand(Config.Root, new FixedCapacitorHttpClient()).HandleAsync(["config", "set", "telemetry", "off"]);
 
         await Assert.That(exit).IsEqualTo(0);
         await Assert.That(CliTelemetry.Enabled).IsFalse();

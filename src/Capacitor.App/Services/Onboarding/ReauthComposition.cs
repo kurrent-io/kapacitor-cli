@@ -25,11 +25,13 @@ internal sealed record ReauthGraph(SignInStepViewModel SignIn, WizardAuthService
 /// </summary>
 internal static class ReauthComposition {
     internal static ReauthGraph Build(
-            ConfigRoot root, string profile, string serverUrl, WizardBridges bridges,
+            ConfigRoot root, TokenStore tokenStore, IHttpClientFactory httpFactory, IAuthProxyClient proxy,
+            GitHubOAuthClient github, WorkOSClient workos,
+            string profile, string serverUrl, WizardBridges bridges,
             ConsentFlipClaims claims, IAppStateStore appState, IUrlOpener urlOpener,
             Func<WizardFacadeSpec, Func<ConnectIntent, CancellationToken, Task<AuthResult>>> operation) {
-        var auth = new WizardAuthService(
-            WizardComposition.BuildOperation(root, profile, bridges, claims, operation));
+        var auth = new WizardAuthService(WizardComposition.BuildOperation(
+            root, tokenStore, httpFactory, proxy, github, workos, profile, bridges, claims, operation));
         var connect = new ConnectStepViewModel();
         connect.Prefill(serverUrl);
 

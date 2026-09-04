@@ -5,6 +5,8 @@ using Capacitor.Cli.Core.Config;
 using Capacitor.Cli.Core.Harness.Codex;
 using Capacitor.Cli.Harness.Gemini;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Harness.Codex;
 
 /// <summary>
@@ -27,8 +29,8 @@ namespace Capacitor.Cli.Harness.Codex;
 /// subagent — or one step — never skips the rest; re-import recovers). Mirrors
 /// <see cref="GeminiSubagentTeardown"/>.
 /// </summary>
-sealed class CodexSubagentTeardown(ConfigRoot config, ProfileContext profiles) {
-    readonly WatcherManager _watchers = new(config, profiles);
+sealed class CodexSubagentTeardown(ConfigRoot config, ProfileContext profiles, ICapacitorHttpClient http) {
+    readonly WatcherManager _watchers = new(config, profiles, http);
 
     /// <summary>
     /// Time budget for the teardown on a shutdown path (the parent-exit watchdog), so a slow
@@ -58,7 +60,7 @@ sealed class CodexSubagentTeardown(ConfigRoot config, ProfileContext profiles) {
         // actually posted to (a process configured for a different default server must not
         // resolve the wrong credential).
         var       baseUrl = profiles.Resolution.ServerUrl!;
-        using var client  = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
+        using var client  = await http.ForBackgroundAsync();
         var       payload = CodexSubagentDiscovery.BuildStopPayload(sessionId, agentId, agentType, subFile);
         using var content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
         await client.PostWithRetryAsync($"{baseUrl}/hooks/subagent-stop", content);

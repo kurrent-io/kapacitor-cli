@@ -4,10 +4,12 @@ using Capacitor.Cli.Core;
 using Capacitor.Cli.Core.Config;
 using Capacitor.Cli.Core.Harness.Claude;
 using Capacitor.Cli.Core.Harness.Codex;
+using Capacitor.Cli.Core.Http;
 
 namespace Capacitor.Cli.Commands;
 
-sealed class WhatsDoneCommand(ConfigRoot config, ProfileContext profiles, UserHome home) {
+sealed class WhatsDoneCommand(
+        ConfigRoot config, ProfileContext profiles, UserHome home, ICapacitorHttpClient http) {
     public async Task<int> HandleGenerateWhatsDone(string baseUrl, string sessionId, string vendor = "claude") {
         // Redirect output to log file (same pattern as WatchCommand)
         var logDir = config.Path("logs");
@@ -32,7 +34,10 @@ sealed class WhatsDoneCommand(ConfigRoot config, ProfileContext profiles, UserHo
     public async Task<int> GenerateForSessionAsync(string baseUrl, string sessionId, Action<string> log, string vendor = "claude") {
         log($"Generating what's-done summary for session {sessionId}");
 
-        using var httpClient = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
+        // The background lane, not the interactive one: both entry points are unattended — one has
+        // already redirected stderr into a log file, the other runs inside a silent import loop — so a
+        // re-auth hint reaches nobody and multiplies by the session count.
+        using var httpClient = await http.ForBackgroundAsync();
 
         // 1. Fetch session recap
         string recapText;

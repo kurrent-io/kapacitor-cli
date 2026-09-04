@@ -62,7 +62,8 @@ public class AgentStatusSnapshotTests {
         var decisionLog = new LaunchConsentDecisionLog(config.Store.StateDirectory(config.Name), NullLogger.Instance);
         var gate        = new LaunchConsentGate(store, decisionLog, broker, TimeProvider.System, NullLogger<LaunchConsentGate>.Instance);
 
-        var connection       = new ServerConnection(config, NullLoggerFactory.Instance, NullLogger<ServerConnection>.Instance);
+        var tokens           = AuthFixtures.NewTokenStore(Config.Root);
+        var connection       = new ServerConnection(config, tokens, NullLoggerFactory.Instance, NullLogger<ServerConnection>.Instance);
         var worktreeManager  = new WorktreeManager(config, NullLogger<WorktreeManager>.Instance);
         var repoMatcher      = new RepoMatcher(config, NullLogger<RepoMatcher>.Instance);
         var permissionBridge = new LocalPermissionBridge(connection, NullLogger<LocalPermissionBridge>.Instance);
@@ -70,7 +71,8 @@ public class AgentStatusSnapshotTests {
 
         var orchestrator = new AgentOrchestrator(
             config, Config.Root, Home, connection, worktreeManager, repoMatcher,
-            new NoopPtyProcessFactory(), new NoopHttpClientFactory(),
+            new NoopPtyProcessFactory(), new NoopHttpClientFactory(), new FixedCapacitorHttpClient(),
+            tokens,
             permissionBridge, new Dictionary<string, IHostedAgentLauncher>(),
             new Dictionary<string, IHostedAgentRuntimeFactory>(), new NoopHostLifetime(),
             NullLogger<AgentOrchestrator>.Instance, gate, statusNotifier: notifier);

@@ -12,9 +12,9 @@ namespace Capacitor.Cli.Tests.Integration;
 /// <c>finally</c>.
 ///
 /// <para>Each case runs the real compiled binary in an isolated child process with its own
-/// <c>KCAP_CONFIG_DIR</c> (mirroring <see cref="UnusableUrlHookMatrixTests"/>) rather than
-/// pointing <c>UpdateCommand.RegistryBaseUrl</c> at a WireMock server: that seam is an in-process
-/// static field of the PARENT test process and has no effect on a spawned child. Instead, each
+/// <c>KCAP_CONFIG_DIR</c> (mirroring <see cref="UnusableUrlHookMatrixTests"/>). A stub registry is
+/// no use here: the child resolves its own registry client from its own container, so nothing the
+/// parent registers reaches it. Instead, each
 /// case pre-seeds the on-disk update-check cache file directly with a fresh, already-newer
 /// record — the exact on-disk shape <c>UpdateCommand.UpdateCacheRecord</c> reads via its
 /// <c>IsFresh</c> cache-hit path — so the child's check resolves from that local file without

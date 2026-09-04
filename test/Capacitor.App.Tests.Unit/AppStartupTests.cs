@@ -37,7 +37,9 @@ public class AppStartupTests {
         var isVisible = await AvaloniaSession.DispatchAsync(() => {
             var service = new FakeDaemonClientService();
             var (actions, notifier) = NewActions(service);
-            var window = AppUnderTest.BuildAndShowMainWindow(service, Config.Root, actions, notifier, new FakeTicker(), CancellationToken.None, TestActivity.New());
+            var window = AppUnderTest.BuildAndShowMainWindow(
+                service, Config.Root, AuthFixtures.NewTokenStore(Config.Root), actions,
+                notifier, new FakeTicker(), CancellationToken.None, TestActivity.New());
             Dispatcher.UIThread.RunJobs(); // flush the deferred Loaded post (diagnostic parity with the smoke test)
 
             var visible = window.IsVisible;

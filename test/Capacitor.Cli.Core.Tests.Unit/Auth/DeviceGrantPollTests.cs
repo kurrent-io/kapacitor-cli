@@ -36,13 +36,13 @@ public class DeviceGrantPollTests {
 
             return Json("""{"error":"authorization_pending"}""");
         });
-        using var http = new HttpClient(handler);
+        var github = new GitHubOAuthClient(new PlainHttpClientFactory(handler));
 
         // Every clock read moves a second, so the 2-second deadline is reached within a few polls.
         var time = new FakeTimeProvider { AutoAdvanceAmount = TimeSpan.FromSeconds(1) };
 
         var token = await OAuthLoginFlow.RunDeviceFlowAsync(
-            http, "client_id", new RecordingBrowser(), progress: new RecordingAuthProgress(), time: time);
+            github, "client_id", new RecordingBrowser(), progress: new RecordingAuthProgress(), time: time);
 
         await Assert.That(token).IsNull();
         await Assert.That(polls).IsLessThan(5);   // bounded, not forever
@@ -68,10 +68,10 @@ public class DeviceGrantPollTests {
                   }
                 : Json("""{"access_token":"tok"}""");
         });
-        using var http = new HttpClient(handler);
+        var github = new GitHubOAuthClient(new PlainHttpClientFactory(handler));
 
         var token = await OAuthLoginFlow.RunDeviceFlowAsync(
-            http, "client_id", new RecordingBrowser(), progress: new RecordingAuthProgress(),
+            github, "client_id", new RecordingBrowser(), progress: new RecordingAuthProgress(),
             time: new FakeTimeProvider { AutoAdvanceAmount = TimeSpan.FromSeconds(1) });
 
         await Assert.That(token).IsEqualTo("tok");
@@ -96,12 +96,12 @@ public class DeviceGrantPollTests {
     [Test]
     public async Task A_hung_poll_is_retried_rather_than_ending_the_sign_in() {
         var       handler  = new HangsOnceHandler();
-        using var http     = new HttpClient(handler);
+        var github = new GitHubOAuthClient(new PlainHttpClientFactory(handler));
         var       progress = new RecordingAuthProgress();
         var       device   = new DeviceCodeResponse { DeviceCode = "dc", ExpiresIn = 900, Interval = 0 };
 
         var token = await OAuthLoginFlow.PollDeviceGrantAsync(
-            http, "https://token.test/token", new() { ["client_id"] = "c" },
+            github.PollForTokenAsync, new() { ["client_id"] = "c" },
             CapacitorJsonContext.Default.GitHubTokenResponse,
             r => (r.AccessToken, r.Error),
             device, interval: 0, CancellationToken.None, progress,
@@ -131,11 +131,11 @@ public class DeviceGrantPollTests {
                 ? Json("""{"message":"temporarily unavailable"}""", HttpStatusCode.InternalServerError)
                 : Json("""{"access_token":"tok"}""");
         });
-        using var http     = new HttpClient(handler);
+        var github = new GitHubOAuthClient(new PlainHttpClientFactory(handler));
         var       progress = new RecordingAuthProgress();
 
         var token = await OAuthLoginFlow.RunDeviceFlowAsync(
-            http, "client_id", new RecordingBrowser(opens: false), progress: progress,
+            github, "client_id", new RecordingBrowser(opens: false), progress: progress,
             time: new FakeTimeProvider { AutoAdvanceAmount = TimeSpan.FromSeconds(1) });
 
         await Assert.That(token).IsEqualTo("tok");
@@ -150,11 +150,11 @@ public class DeviceGrantPollTests {
             request.RequestUri!.AbsolutePath.Contains("device/code")
                 ? DeviceCode(expiresIn: 900)
                 : Json("""{"error":"device_flow_disabled"}"""));
-        using var http     = new HttpClient(handler);
+        var github = new GitHubOAuthClient(new PlainHttpClientFactory(handler));
         var       progress = new RecordingAuthProgress();
 
         var token = await OAuthLoginFlow.RunDeviceFlowAsync(
-            http, "client_id", new RecordingBrowser(opens: false), progress: progress,
+            github, "client_id", new RecordingBrowser(opens: false), progress: progress,
             time: new FakeTimeProvider { AutoAdvanceAmount = TimeSpan.FromSeconds(1) });
 
         await Assert.That(token).IsNull();

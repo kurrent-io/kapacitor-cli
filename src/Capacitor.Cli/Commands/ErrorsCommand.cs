@@ -1,45 +1,28 @@
-using System.Text.Json;
-using Capacitor.Cli.Core;
-using Capacitor.Cli.Core.Config;
+using Capacitor.Cli.Core.Http;
 
 namespace Capacitor.Cli.Commands;
 
-class ErrorsCommand(ConfigRoot config, ProfileContext profiles) {
+class ErrorsCommand(ISessionsApi sessionsApi) {
     public async Task<int> HandleErrors(string sessionId, bool chain) {
-        var       baseUrl    = profiles.Resolution.ServerUrl!;
-        using var httpClient = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
-        var       query      = chain ? "?chain=true" : "";
-
-        HttpResponseMessage resp;
+        ErrorsResult result;
 
         try {
-            resp = await httpClient.GetWithRetryAsync($"{baseUrl}/api/sessions/{sessionId}/errors{query}");
-        } catch (HttpRequestException ex) {
-            HttpClientExtensions.WriteUnreachableError(baseUrl, ex);
+            result = await sessionsApi.GetErrorsAsync(sessionId, chain);
+        } catch (CapacitorApiException ex) {
+            await Console.Error.WriteLineAsync(ex.Message);
 
             return 1;
         }
 
-        if (await HttpClientExtensions.HandleUnauthorizedAsync(resp)) {
-            return 1;
-        }
-
-        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) {
+        if (result is ErrorsResult.NotFound) {
             await Console.Error.WriteLineAsync($"Session not found: {sessionId}");
 
             return 1;
         }
 
-        if (!resp.IsSuccessStatusCode) {
-            await Console.Error.WriteLineAsync($"HTTP {(int)resp.StatusCode}");
+        var errors = ((ErrorsResult.Found)result).Errors;
 
-            return 1;
-        }
-
-        var json   = await resp.Content.ReadAsStringAsync();
-        var errors = JsonSerializer.Deserialize(json, CapacitorJsonContext.Default.ListErrorEntry);
-
-        if (errors is null || errors.Count == 0) {
+        if (errors.Count == 0) {
             await Console.Out.WriteLineAsync("No errors found.");
 
             return 0;

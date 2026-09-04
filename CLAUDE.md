@@ -183,6 +183,14 @@ Title: commit-subject rules minus the reference — `Show "Copied" tooltip on cl
 
 Description: **before writing it, open [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md) and follow its comment block** — it owns length, headings and the Never list. `gh pr create --body` not rendering the template is not an exemption from it.
 
+## Code conventions
+
+**Return `FrozenDictionary<K,V>.Empty` / `FrozenSet<T>.Empty` for an empty `IReadOnlyDictionary`/`IReadOnlySet`** — a fresh empty `Dictionary`/`HashSet` per miss allocates for nothing, and these are shared singletons.
+
+**No `InternalsVisibleTo` to a production assembly.** If a shipping project needs a member, that member is not internal — make it public. Test-assembly grants are fine, and most of the grants here are those. `Capacitor.Cli.Core` keeps its grants to `kcap` and `kcap-daemon`, the two shipping executables; that is grandfathered, not a precedent, and **new projects start with none**.
+
+**One type per file, named after the type.** Several types in one file is discouraged, whatever the neighbouring files do — and plenty here do. Three exceptions: an enum plus its extension methods; a closely-related hierarchy (an interface plus many small implementations); a registry of descriptors. The last two are rare — reach for them when splitting would leave files that only make sense read together, not to save a file.
+
 ## Dos and donts
 
 - DO use `JsonElementExtensions` instead of checking JSON value kind.

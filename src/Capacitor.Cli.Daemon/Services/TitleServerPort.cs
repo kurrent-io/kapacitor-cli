@@ -1,7 +1,7 @@
 using System.Text;
 using System.Text.Json.Nodes;
 using Capacitor.Cli.Core;
-using Capacitor.Cli.Core.Config;
+using Capacitor.Cli.Core.Http;
 using Capacitor.Cli.Core.WorkItems;
 
 namespace Capacitor.Cli.Daemon.Services;
@@ -14,7 +14,7 @@ namespace Capacitor.Cli.Daemon.Services;
 /// "the server has no title" from "the server couldn't answer", or an outage would trigger a
 /// paid generation for a session the watcher already titled.
 /// </summary>
-internal sealed class TitleServerPort(ConfigRoot configRoot, ProfileContext profiles, string baseUrl) : ITitleServerPort {
+internal sealed class TitleServerPort(ICapacitorHttpClient http, string baseUrl) : ITitleServerPort {
     readonly string _baseUrl = baseUrl.TrimEnd('/');
 
     public async Task<string?> GetTitleAsync(string sessionId, CancellationToken ct) {
@@ -22,7 +22,7 @@ internal sealed class TitleServerPort(ConfigRoot configRoot, ProfileContext prof
         // session to converge with — that is genuine silence, not a failed read.
         if (WorkContextIds.CanonicalSessionId(sessionId) is null) return null;
 
-        var (client, status) = await HttpClientExtensions.CreateClientWithAuthStatusAsync(configRoot, profiles, _baseUrl, ct);
+        var (client, status) = await http.ForHookAsync(ct);
 
         using (client) {
             if (status is AuthStatus.Expired or AuthStatus.NotAuthenticated or AuthStatus.WrongServer) {
@@ -49,7 +49,7 @@ internal sealed class TitleServerPort(ConfigRoot configRoot, ProfileContext prof
         // the one the summary read used.
         if (WorkContextIds.CanonicalSessionId(sessionId) is not { } canonical) return true; // nothing to converge with
 
-        var (client, status) = await HttpClientExtensions.CreateClientWithAuthStatusAsync(configRoot, profiles, _baseUrl, ct);
+        var (client, status) = await http.ForHookAsync(ct);
 
         using (client) {
             if (status is AuthStatus.Expired or AuthStatus.NotAuthenticated or AuthStatus.WrongServer) return false;

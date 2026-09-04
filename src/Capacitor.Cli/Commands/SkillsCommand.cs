@@ -1,8 +1,7 @@
-using System.Net;
 using System.Text.Json;
 using Capacitor.Cli.Core;
 using Capacitor.Cli.Core.Harness;
-using Capacitor.Cli.Core.Config;
+using Capacitor.Cli.Core.Http;
 using Capacitor.Cli.Core.Skills;
 
 namespace Capacitor.Cli.Commands;
@@ -14,7 +13,7 @@ namespace Capacitor.Cli.Commands;
 /// path kcap owns, and pruning walks the manifest — never a skills root — so user-authored skills
 /// are untouchable. Nothing is ever written into a repo.
 /// </summary>
-class SkillsCommand(ConfigRoot config, ProfileContext profiles, UserHome home) {
+class SkillsCommand(ConfigRoot config, UserHome home, IRepositoriesApi repositories) {
     // The background refresh keys off each manifest's synced_at, so a burst of session starts
     // costs one network round-trip per interval per target, not one per session.
     static readonly TimeSpan AutoSyncInterval = TimeSpan.FromHours(6);
@@ -31,7 +30,6 @@ class SkillsCommand(ConfigRoot config, ProfileContext profiles, UserHome home) {
     ];
 
     public async Task<int> HandleSync(bool dryRun, bool auto = false) {
-        var baseUrl = profiles.Resolution.ServerUrl!;
         var cwd = Environment.CurrentDirectory;
 
         if (GitRepository.FindRoot(cwd) is null) {
@@ -45,7 +43,6 @@ class SkillsCommand(ConfigRoot config, ProfileContext profiles, UserHome home) {
         }
         var hash = RepoHashHelper.ComputeRepoHash(repo.Owner, repo.RepoName);
 
-        using var client = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
         // Real harness detection, not destination-parent existence: ~/.agents is created by
         // kcap's own installer, so a fresh machine with (say) Codex installed would otherwise
         // never adopt the shared tree.
@@ -59,14 +56,13 @@ class SkillsCommand(ConfigRoot config, ProfileContext profiles, UserHome home) {
             if (!File.Exists(config.Path(manifestName)) && !ConsumerPresent(harnesses, target.Key))
                 continue;
             exitCode = Math.Max(exitCode,
-                await SyncTargetAsync(client, baseUrl, hash, target, manifestName, dryRun, auto));
+                await SyncTargetAsync(hash, target, manifestName, dryRun, auto));
         }
         return exitCode;
     }
 
     async Task<int> SyncTargetAsync(
-            HttpClient client, string baseUrl, string hash, SkillsTarget target,
-            string manifestName, bool dryRun, bool auto) {
+            string hash, SkillsTarget target, string manifestName, bool dryRun, bool auto) {
         void Info(string line) { if (!auto) Console.WriteLine(line); }
         var manifestPath = config.Path(manifestName);
 
@@ -94,49 +90,27 @@ class SkillsCommand(ConfigRoot config, ProfileContext profiles, UserHome home) {
         var drifted = (manifest?.Skills ?? []).Where(SkillsMaterializer.HasDrifted)
             .Select(e => e.DocId).ToHashSet();
 
-        var url = $"{baseUrl}/api/repositories/{hash}/skills"
-                + (target.Vendor is { } vendor ? $"?vendor={vendor}" : "?")
-                + (HostPlatform.Normalized is { } platform ? $"&platform={platform}" : "");
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        if (drifted.Count == 0 && manifest?.Etag is { Length: > 0 } etag)
-            request.Headers.TryAddWithoutValidation("If-None-Match", $"\"{etag}\"");
-
-        HttpResponseMessage resp;
+        SkillsSnapshotResult fetched;
         try {
-            resp = await client.SendAsync(request);
-        } catch (HttpRequestException ex) {
-            HttpClientExtensions.WriteUnreachableError(baseUrl, ex);
+            fetched = await repositories.GetSkillsSnapshotAsync(
+                hash, target.Vendor, drifted.Count == 0 ? manifest?.Etag : null);
+        } catch (CapacitorApiException ex) {
+            await Console.Error.WriteLineAsync(ex.Message);
             return 1;
         }
 
-        if (resp.StatusCode == HttpStatusCode.NotModified) {
+        if (fetched is SkillsSnapshotResult.NotModified) {
             if (!dryRun) SaveManifest(manifestPath, manifest! with { SyncedAt = DateTimeOffset.UtcNow });
             Info($"[{target.Key}] skills up to date ({manifest?.Skills?.Length ?? 0} materialized).");
             return 0;
         }
-        if (await HttpClientExtensions.HandleUnauthorizedAsync(resp)) return 1;
-        if (resp.StatusCode == HttpStatusCode.NotFound) {
+        if (fetched is SkillsSnapshotResult.NotFound) {
             await Console.Error.WriteLineAsync(
                 "Repo not found or not visible for this profile. Check `kcap whoami` / your active profile.");
             return 1;
         }
-        if (!resp.IsSuccessStatusCode) {
-            await Console.Error.WriteLineAsync($"HTTP {(int)resp.StatusCode}");
-            return 1;
-        }
 
-        SkillsSnapshotResponse? dto;
-        try {
-            dto = JsonSerializer.Deserialize(
-                await resp.Content.ReadAsStringAsync(), CapacitorJsonContext.Default.SkillsSnapshotResponse);
-        } catch (JsonException) {
-            dto = null;
-        }
-        if (dto is null) {
-            await Console.Error.WriteLineAsync("Malformed response from server (could not parse skills snapshot).");
-            return 1;
-        }
-
+        var dto      = ((SkillsSnapshotResult.Found)fetched).Snapshot;
         var snapshot = dto.Skills ?? [];
         // Whole-snapshot validation BEFORE any filesystem mutation: acting on a partially-valid
         // snapshot and recording its etag would prune real skills, write no replacements, and

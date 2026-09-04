@@ -6,10 +6,12 @@ using Capacitor.Cli.Harness.Claude;
 
 // ReSharper disable MethodHasAsyncOverload
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands;
 
-class PermissionRequestCommand(ConfigRoot config, ProfileContext profiles) {
-    readonly WatcherManager _watchers = new(config, profiles);
+class PermissionRequestCommand(ConfigRoot config, ProfileContext profiles, ICapacitorHttpClient http) {
+    readonly WatcherManager _watchers = new(config, profiles, http);
 
     string Url => profiles.Resolution.ServerUrl!;
 
@@ -96,11 +98,19 @@ class PermissionRequestCommand(ConfigRoot config, ProfileContext profiles) {
         // auth, so an accidentally / maliciously set non-loopback value would leak the
         // hook payload (tool name, raw tool input) to an arbitrary endpoint.
         if (TryGetLoopbackDaemonUrl(out var daemonUrl)) {
-            var bridgePayload = BuildBridgePayload(node, sessionId, HookAgentId.FromEnvironment());
-            return await PostAsync(daemonUrl + "/claude/permission-request", bridgePayload, authenticatedBase: null, stdout);
+            var       bridgePayload = BuildBridgePayload(node, sessionId, HookAgentId.FromEnvironment());
+            using var bridge        = http.Loopback();
+
+            return await PostAsync(bridge, daemonUrl + "/claude/permission-request", bridgePayload, stdout);
         }
 
-        return await PostAsync(Url + "/hooks/permission-request", payload, Url, stdout);
+        // The hook verb, so a lapsed credential is a value rather than a line: Claude reads this
+        // hook's stderr as its result. Sent regardless of that value — the agent is blocked on a
+        // decision, and the lane's recovery still gets its attempt at rotating the bearer.
+        var       attempt      = await http.ForHookAsync();
+        using var authenticated = attempt.Client;
+
+        return await PostAsync(authenticated, Url + "/hooks/permission-request", payload, stdout);
     }
 
     /// <summary>
@@ -164,11 +174,7 @@ class PermissionRequestCommand(ConfigRoot config, ProfileContext profiles) {
         return payload;
     }
 
-    async Task<int> PostAsync(string url, JsonObject payload, string? authenticatedBase, TextWriter? stdout = null) {
-        using var client = authenticatedBase is not null
-            ? await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, authenticatedBase)
-            : new HttpClient();
-
+    static async Task<int> PostAsync(HttpClient client, string url, JsonObject payload, TextWriter? stdout = null) {
         // The server-side long-poll waits up to 10 hours for the user to decide; the
         // daemon-side bridge inherits that bound transparently. Add a minute of slack
         // so the HTTP client doesn't tear down a still-pending request first.
@@ -204,7 +210,13 @@ class PermissionRequestCommand(ConfigRoot config, ProfileContext profiles) {
         var toolName  = node["tool_name"]?.GetValue<string>() ?? "Unknown";
         var toolInput = node["tool_input"];
 
-        using var client = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, Url);
+        var       attempt = await http.ForHookAsync();
+        using var client  = attempt.Client;
+
+        // Recording is best-effort, and without a credential the POST can only 401. Skipping returns
+        // the two-second budget to the approval prompt this hook is holding up.
+        if (!attempt.Usable) return 0;
+
         client.Timeout = TimeSpan.FromSeconds(2);
 
         var payload = new JsonObject {

@@ -47,7 +47,8 @@ public class ServerConnectionRespondToPermissionWireTests {
     }
 
     sealed class TestServerConnection(DaemonConfig config)
-        : ServerConnection(config, NullLoggerFactory.Instance, NullLogger<ServerConnection>.Instance);
+        : ServerConnection(config, UnusedTokenStore.Create(), NullLoggerFactory.Instance,
+                           NullLogger<ServerConnection>.Instance);
 
     [Test]
     public async Task Relay_lands_on_a_hub_declaring_the_servers_parameter_list() {

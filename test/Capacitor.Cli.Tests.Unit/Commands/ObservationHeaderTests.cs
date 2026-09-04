@@ -2,6 +2,8 @@ using Capacitor.Cli.Commands;
 using Capacitor.Cli.Core;
 using Capacitor.Cli.Core.Auth;
 using Capacitor.Cli.Core.Config;
+using Capacitor.Cli.Core.Http;
+using Microsoft.Extensions.DependencyInjection;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
 using WireMock.Server;
@@ -9,16 +11,14 @@ using WireMock.Server;
 namespace Capacitor.Cli.Tests.Unit.Commands;
 
 /// <summary>
-/// The wire contract PR-2 (kcap-server) reads: every client built by
-/// <see cref="HttpClientExtensions"/>'s single choke point, and the raw client
-/// <see cref="WhoamiCommand"/> builds outside it, must carry the CLI's display version, and must
+/// The wire contract the server reads: every request the CLI sends must carry the CLI's display
+/// version, and must
 /// carry the update-check opt-out header if and only if the active profile turned it off. Absence
 /// of the opt-out header on a version-carrying request is read by the server as "on" — so both the
 /// present and the absent case are asserted here, not just the header's shape when it does appear.
 ///
-/// <para>Keyed on the auth-discovery cache: <c>HttpClientExtensions</c> caches the first successful
-/// <c>/auth/config</c> discovery for the whole process, so a stub here decides what a concurrent
-/// test's stub returns.</para>
+/// <para>Asserted on the request WireMock actually received, driven through a container built fresh
+/// per test — a client the container never touched would carry none of the tags asserted here.</para>
 /// </summary>
 [NotInParallel("AuthProviderDiscoveryCache")]
 public class ObservationHeaderTests : IDisposable {
@@ -26,15 +26,42 @@ public class ObservationHeaderTests : IDisposable {
 
     readonly WireMockServer _server = WireMockServer.Start();
 
-    [Before(Test)]
-    public void Cleanup() {
-        HttpClientExtensions.ResetProviderCacheForTesting();
+    ServiceProvider? _sp;
 
+    /// <summary>The real container, because the tags belong to its handler chain now: a stub client
+    /// would carry none and the assertions below would pass on nothing.</summary>
+    WhoamiCommand Whoami(ProfileContext profiles) {
+        var services = new ServiceCollection();
+
+        services.AddSingleton(Config.Root);
+        services.AddSingleton(profiles);
+        services.AddSingleton(new CapacitorServer(_server.Urls[0], Config.Root, profiles));
+        services.AddCapacitorHttp();
+        _sp = services.BuildServiceProvider();
+
+        return new WhoamiCommand(
+            Config.Root, profiles, AuthFixtures.NewTokenStore(Config.Root), _sp.GetRequiredService<ICapacitorHttpClient>(),
+            _sp.GetRequiredService<AuthProviderDiscovery>());
+    }
+
+    /// <summary>An interactive-command client from the real container, built against
+    /// <paramref name="profiles"/>: the container is what stamps the observation headers now, so a
+    /// hand-built <see cref="HttpClient"/> would carry none of them.</summary>
+    async Task<HttpClient> CommandClientAsync(ProfileContext profiles) {
+        var services = new ServiceCollection();
+
+        services.AddSingleton(Config.Root);
+        services.AddSingleton(profiles);
+        services.AddSingleton(new CapacitorServer(_server.Urls[0], Config.Root, profiles));
+        services.AddCapacitorHttp();
+        _sp = services.BuildServiceProvider();
+
+        return await _sp.GetRequiredService<ICapacitorHttpClient>().ForCommandAsync();
     }
 
     public void Dispose() {
+        _sp?.Dispose();
         _server.Stop();
-        HttpClientExtensions.ResetProviderCacheForTesting();
     }
 
     void StubDiscovery(string provider = "None") =>
@@ -43,19 +70,20 @@ public class ObservationHeaderTests : IDisposable {
                 .WithHeader("Content-Type", "application/json")
                 .WithBody($$"""{"provider":"{{provider}}"}"""));
 
-    // ── CreateClientCoreAsync (via CreateClientWithAuthStatusAsync) ────────────────────────────
+    // ── The observation-header handler, driven through the real container ─────────────────────
 
     [Test]
     public async Task Client_always_carries_the_display_version_with_no_build_suffix() {
         StubDiscovery();
+        _server.Given(Request.Create().WithPath("/ping").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(200));
 
-        var (client, status) = await HttpClientExtensions.CreateClientWithAuthStatusAsync(
-            Config.Root, Resolutions.None(Config.Root), _server.Urls[0]);
+        using var client = await CommandClientAsync(Resolutions.None(Config.Root));
+        using var response = await client.GetAsync($"{_server.Urls[0]}/ping");
 
-        await Assert.That(status).IsEqualTo(AuthStatus.NoAuthRequired);
-        await Assert.That(client.DefaultRequestHeaders.Contains(HttpClientExtensions.CliVersionHeader)).IsTrue();
+        var value = _server.LogEntries.Single(e => e.RequestMessage.Path == "/ping")
+            .RequestMessage.Headers![HttpClientExtensions.CliVersionHeader].Single();
 
-        var value = client.DefaultRequestHeaders.GetValues(HttpClientExtensions.CliVersionHeader).Single();
         await Assert.That(value).IsEqualTo(CapacitorVersion.CurrentDisplay());
         await Assert.That(value).DoesNotContain("+");
     }
@@ -63,13 +91,17 @@ public class ObservationHeaderTests : IDisposable {
     [Test]
     public async Task Off_header_is_sent_when_the_active_profile_disabled_update_check() {
         StubDiscovery();
+        _server.Given(Request.Create().WithPath("/ping").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(200));
         var profiles = Resolutions.Of(new Profile { UpdateCheck = false }, "obs-headers-off", _server.Urls[0]);
 
-        var (client, _) = await HttpClientExtensions.CreateClientWithAuthStatusAsync(
-            Config.Root, profiles, _server.Urls[0]);
+        using var client = await CommandClientAsync(profiles);
+        using var response = await client.GetAsync($"{_server.Urls[0]}/ping");
 
-        await Assert.That(client.DefaultRequestHeaders.Contains(HttpClientExtensions.UpdateCheckHeader)).IsTrue();
-        await Assert.That(client.DefaultRequestHeaders.GetValues(HttpClientExtensions.UpdateCheckHeader).Single())
+        var headers = _server.LogEntries.Single(e => e.RequestMessage.Path == "/ping").RequestMessage.Headers!;
+
+        await Assert.That(headers.ContainsKey(HttpClientExtensions.UpdateCheckHeader)).IsTrue();
+        await Assert.That(headers[HttpClientExtensions.UpdateCheckHeader].Single())
             .IsEqualTo(HttpClientExtensions.UpdateCheckOffValue);
     }
 
@@ -81,23 +113,32 @@ public class ObservationHeaderTests : IDisposable {
     [Test]
     public async Task Off_header_is_absent_when_the_active_profile_has_update_check_on() {
         StubDiscovery();
+        _server.Given(Request.Create().WithPath("/ping").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(200));
         var profiles = Resolutions.Of(new Profile { UpdateCheck = true }, "obs-headers-on", _server.Urls[0]);
 
-        var (client, _) = await HttpClientExtensions.CreateClientWithAuthStatusAsync(
-            Config.Root, profiles, _server.Urls[0]);
+        using var client = await CommandClientAsync(profiles);
+        using var response = await client.GetAsync($"{_server.Urls[0]}/ping");
 
-        await Assert.That(client.DefaultRequestHeaders.Contains(HttpClientExtensions.UpdateCheckHeader)).IsFalse();
+        var headers = _server.LogEntries.Single(e => e.RequestMessage.Path == "/ping").RequestMessage.Headers!;
+
+        await Assert.That(headers.ContainsKey(HttpClientExtensions.UpdateCheckHeader)).IsFalse();
     }
 
     [Test]
     public async Task Off_header_is_absent_when_no_profile_is_resolved_at_all() {
         StubDiscovery();
+        _server.Given(Request.Create().WithPath("/ping").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(200));
+
         // Nothing resolved and no config.json under this root, so the effective profile is the
         // built-in default, whose update_check defaults to true.
-        var (client, _) = await HttpClientExtensions.CreateClientWithAuthStatusAsync(
-            Config.Root, Resolutions.None(Config.Root), _server.Urls[0]);
+        using var client = await CommandClientAsync(Resolutions.None(Config.Root));
+        using var response = await client.GetAsync($"{_server.Urls[0]}/ping");
 
-        await Assert.That(client.DefaultRequestHeaders.Contains(HttpClientExtensions.UpdateCheckHeader)).IsFalse();
+        var headers = _server.LogEntries.Single(e => e.RequestMessage.Path == "/ping").RequestMessage.Headers!;
+
+        await Assert.That(headers.ContainsKey(HttpClientExtensions.UpdateCheckHeader)).IsFalse();
     }
 
     // ── WhoamiCommand.ProbeAsync (the raw client that bypasses the choke point) ────────────────
@@ -116,7 +157,7 @@ public class ObservationHeaderTests : IDisposable {
             .RespondWith(Response.Create().WithStatusCode(200));
 
         var profiles = Resolutions.Of(new Profile { UpdateCheck = false }, profileName, _server.Urls[0]);
-        await new TokenStore(Config.Root).SaveAsync(profileName, new StoredTokens {
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync(profileName, new StoredTokens {
             AccessToken    = "tok-whoami-off",
             ExpiresAt      = DateTimeOffset.UtcNow.AddHours(1),
             GitHubUsername = "alice",
@@ -125,7 +166,7 @@ public class ObservationHeaderTests : IDisposable {
         });
 
         // The one resolution steers both: the header preference and the profile whose token is read.
-        await new WhoamiCommand(Config.Root, profiles).HandleAsync();
+        await Whoami(profiles).HandleAsync();
 
         var probe = _server.LogEntries.Single(e => e.RequestMessage.Path == WhoamiCommand.ProbePath);
 
@@ -144,7 +185,7 @@ public class ObservationHeaderTests : IDisposable {
             .RespondWith(Response.Create().WithStatusCode(200));
 
         var profiles = Resolutions.Of(new Profile { UpdateCheck = true }, profileName, _server.Urls[0]);
-        await new TokenStore(Config.Root).SaveAsync(profileName, new StoredTokens {
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync(profileName, new StoredTokens {
             AccessToken    = "tok-whoami-on",
             ExpiresAt      = DateTimeOffset.UtcNow.AddHours(1),
             GitHubUsername = "alice",
@@ -153,7 +194,7 @@ public class ObservationHeaderTests : IDisposable {
         });
 
         // The one resolution steers both: the header preference and the profile whose token is read.
-        await new WhoamiCommand(Config.Root, profiles).HandleAsync();
+        await Whoami(profiles).HandleAsync();
 
         var probe = _server.LogEntries.Single(e => e.RequestMessage.Path == WhoamiCommand.ProbePath);
 

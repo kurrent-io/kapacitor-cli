@@ -8,6 +8,10 @@ using WireMock.Server;
 namespace Capacitor.Cli.Core.Tests.Unit.Auth;
 
 public class OAuthFlowTests {
+    // The code exchange rides the sign-in lane; against a stub, an unconfigured client is what
+    // that lane resolves to.
+    static readonly GitHubOAuthClient Github = new(new PlainHttpClientFactory());
+
     [Test]
     public async Task WorkOS_authorize_url_targets_api_domain_with_authkit_and_org() {
         var options = OAuthLoginFlow.BuildWorkOSOptions("client_d", "https://api.workos.com", "http://127.0.0.1:5555/callback");
@@ -109,9 +113,10 @@ public class OAuthFlowTests {
         server.Given(Request.Create().WithPath("/user_management/authenticate").UsingPost())
             .RespondWith(Response.Create().WithStatusCode(200).WithBody(
                 """{"user":{"id":"user_x"},"organization_id":"org_a","access_token":"acc","refresh_token":"rt2"}"""));
-        using var http = new HttpClient();
+        using var stub = new StubHost(server.Urls[0]);
 
-        var auth = await OAuthLoginFlow.SwitchWorkOSOrgAsync(http, server.Urls[0], "client_d", "rt1", "org_a");
+        var auth = await new WorkOSClient(new PlainHttpClientFactory(stub))
+            .SwitchOrganizationAsync("client_d", "rt1", "org_a", CancellationToken.None);
 
         await Assert.That(auth!.OrganizationId).IsEqualTo("org_a");
         await Assert.That(auth.RefreshToken).IsEqualTo("rt2");
@@ -123,9 +128,10 @@ public class OAuthFlowTests {
         using var server = WireMockServer.Start();
         server.Given(Request.Create().WithPath("/user_management/authenticate").UsingPost())
             .RespondWith(Response.Create().WithStatusCode(401));
-        using var http = new HttpClient();
+        using var stub = new StubHost(server.Urls[0]);
 
-        var auth = await OAuthLoginFlow.SwitchWorkOSOrgAsync(http, server.Urls[0], "client_d", "rt1", "org_a");
+        var auth = await new WorkOSClient(new PlainHttpClientFactory(stub))
+            .SwitchOrganizationAsync("client_d", "rt1", "org_a", CancellationToken.None);
 
         await Assert.That(auth).IsNull();
     }
@@ -136,9 +142,10 @@ public class OAuthFlowTests {
         server.Given(Request.Create().WithPath("/user_management/authenticate").UsingPost())
             .RespondWith(Response.Create().WithStatusCode(200).WithBody(
                 """{"user":{"id":"user_x"},"access_token":"acc","refresh_token":"rt2"}"""));
-        using var http = new HttpClient();
+        using var stub = new StubHost(server.Urls[0]);
 
-        var auth = await OAuthLoginFlow.RefreshWorkOSTokenAsync(http, server.Urls[0], "client_d", "rt1");
+        var auth = await new WorkOSClient(new PlainHttpClientFactory(stub))
+            .RefreshAsync("client_d", "rt1", CancellationToken.None);
 
         await Assert.That(auth!.AccessToken).IsEqualTo("acc");
         await Assert.That(auth.RefreshToken).IsEqualTo("rt2");
@@ -156,9 +163,10 @@ public class OAuthFlowTests {
         var url = server.Urls[0];
         server.Stop();
 
-        using var http = new HttpClient();
+        using var stub = new StubHost(url);
 
-        var auth = await OAuthLoginFlow.RefreshWorkOSTokenAsync(http, url, "client_d", "rt1");
+        var auth = await new WorkOSClient(new PlainHttpClientFactory(stub))
+            .RefreshAsync("client_d", "rt1", CancellationToken.None);
 
         await Assert.That(auth).IsNull();
     }
@@ -170,7 +178,7 @@ public class OAuthFlowTests {
             .RespondWith(Response.Create().WithStatusCode(200).WithBody("""{"access_token":"gho_abc"}"""));
 
         var token = await OAuthLoginFlow.RunGitHubBrowserFlowAsync(
-            "Iv1.abc", $"{server.Urls[0]}/code-exchange", new RecordingBrowser(), FakeBrowser.WithCode("the_code"));
+            Github, "Iv1.abc", $"{server.Urls[0]}/code-exchange", new RecordingBrowser(), FakeBrowser.WithCode("the_code"));
 
         await Assert.That(token).IsEqualTo("gho_abc");
     }
@@ -182,7 +190,7 @@ public class OAuthFlowTests {
             .RespondWith(Response.Create().WithStatusCode(200).WithBody("""{"access_token":"nope"}"""));
 
         var token = await OAuthLoginFlow.RunGitHubBrowserFlowAsync(
-            "Iv1.abc", $"{server.Urls[0]}/code-exchange", new RecordingBrowser(),
+            Github, "Iv1.abc", $"{server.Urls[0]}/code-exchange", new RecordingBrowser(),
             FakeBrowser.WithRawQuery("?code=the_code&state=attacker"));
 
         await Assert.That(token).IsNull();
@@ -195,7 +203,7 @@ public class OAuthFlowTests {
         var progress = new RecordingAuthProgress();
 
         var token = await OAuthLoginFlow.RunGitHubBrowserFlowAsync(
-            "Iv1.abc", "http://unused.test/code-exchange", new RecordingBrowser(),
+            Github, "Iv1.abc", "http://unused.test/code-exchange", new RecordingBrowser(),
             FakeBrowser.NonSuccess(BrowserResultType.Timeout), progress: progress);
 
         await Assert.That(token).IsNull();
@@ -211,7 +219,7 @@ public class OAuthFlowTests {
         var       progress = new RecordingAuthProgress();
 
         await Assert.That(async () => await OAuthLoginFlow.RunGitHubBrowserFlowAsync(
-                "Iv1.abc", "http://unused.test/code-exchange", new RecordingBrowser(),
+                Github, "Iv1.abc", "http://unused.test/code-exchange", new RecordingBrowser(),
                 FakeBrowser.CancellingCaller(cts), ct: cts.Token, progress: progress))
             .Throws<OperationCanceledException>();
 

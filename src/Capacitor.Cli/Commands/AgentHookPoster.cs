@@ -4,6 +4,8 @@ using Capacitor.Cli.Core.Auth;
 using Capacitor.Cli.Core.Config;
 using Capacitor.Cli.Core.Harness.Cursor;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands;
 
 /// <summary>
@@ -43,9 +45,8 @@ internal enum HookPostOutcome {
 
 /// <summary>
 /// Shared recording-hook POST for the non-Claude agent hooks (Codex, Gemini, Copilot, Pi, Kiro,
-/// OpenCode), which all otherwise built their client with <c>CreateAuthenticatedClientAsync</c>
-/// and POSTed blindly. When auth has lapsed that meant a guaranteed-to-401 POST plus a
-/// misleading per-turn <c>HTTP 401</c> stderr line; this helper instead reports
+/// OpenCode). A lapsed credential makes a POST a guaranteed 401 and its stderr line a misleading
+/// per-turn <c>HTTP 401</c>, so rather than send one this helper reports
 /// <see cref="HookPostOutcome.AuthLapsed"/> so the caller can skip the doomed work and exit
 /// cleanly — carrying the Claude hook's #183 behaviour to the other hooks.
 ///
@@ -57,8 +58,8 @@ internal enum HookPostOutcome {
 /// the user before the request — and names the fix on stderr, the only channel these vendors have.
 /// A no-op for the <c>None</c> provider (posts normally, unauthenticated) and unchanged when authenticated.
 /// </summary>
-internal sealed class AgentHookPoster(ConfigRoot config, ProfileContext profiles) {
-    readonly WatcherManager _watchers = new(config, profiles);
+internal sealed class AgentHookPoster(ConfigRoot config, ProfileContext profiles, ICapacitorHttpClient http) {
+    readonly WatcherManager _watchers = new(config, profiles, http);
 
     // The one URL this process resolved. A hook posting to one server while its watcher streams to
     // another is not a configuration this can represent.
@@ -68,7 +69,7 @@ internal sealed class AgentHookPoster(ConfigRoot config, ProfileContext profiles
     // Anything that isn't a usable client is a lapse. WrongServer especially: the client carries no
     // bearer, so posting anyway would only earn a 401 for a fixable profile mismatch.
     public static bool IsAuthLapsed(AuthStatus status) =>
-        status is AuthStatus.Expired or AuthStatus.NotAuthenticated or AuthStatus.WrongServer;
+        status is AuthStatus.Expired or AuthStatus.NotAuthenticated or AuthStatus.WrongServer or AuthStatus.UnusableServerUrl;
 
     /// <summary>
     /// Builds an auth-aware client for this process's resolved server and POSTs
@@ -83,7 +84,7 @@ internal sealed class AgentHookPoster(ConfigRoot config, ProfileContext profiles
             return Task.FromResult(HookPostOutcome.Skipped);
         }
 
-        return PostAsync(() => HttpClientExtensions.CreateClientWithAuthStatusAsync(config, profiles, Url!), endpoint, body, agentTag);
+        return PostAsync(() => http.ForHookAsync(), endpoint, body, agentTag);
     }
 
     /// <summary>
@@ -91,7 +92,7 @@ internal sealed class AgentHookPoster(ConfigRoot config, ProfileContext profiles
     /// auth outcome without a token store or /auth/config discovery).
     /// </summary>
     internal async Task<HookPostOutcome> PostAsync(
-            Func<Task<(HttpClient Client, AuthStatus Status)>> clientFactory,
+            Func<Task<AuthAttempt>> clientFactory,
             string                                             endpoint,
             string                                             body,
             string                                             agentTag
@@ -146,7 +147,7 @@ internal sealed class AgentHookPoster(ConfigRoot config, ProfileContext profiles
             return Task.FromResult(spooled ? HookPostOutcome.Spooled : HookPostOutcome.Skipped);
         }
 
-        return PostOrSpoolAsync(() => HttpClientExtensions.CreateClientWithAuthStatusAsync(config, profiles, Url!),
+        return PostOrSpoolAsync(() => http.ForHookAsync(),
                                 endpoint, body, agentTag, spool, sessionId, route);
     }
 
@@ -230,7 +231,7 @@ internal sealed class AgentHookPoster(ConfigRoot config, ProfileContext profiles
     /// </summary>
     public Task DrainSpoolsAsync(HookSpool lifecycle, TranscriptSpool transcript, string? sessionId)
         => DrainSpoolsCoreAsync(lifecycle, transcript, sessionId,
-            ct => HttpClientExtensions.CreateClientWithAuthStatusAsync(config, profiles, Url!, ct));
+            http.ForHookAsync);
 
     /// <summary>
     /// The drain itself, with the client factory handed in. Separate from
@@ -240,7 +241,7 @@ internal sealed class AgentHookPoster(ConfigRoot config, ProfileContext profiles
     /// </summary>
     internal async Task DrainSpoolsCoreAsync(
             HookSpool lifecycle, TranscriptSpool transcript, string? sessionId,
-            Func<CancellationToken, Task<(HttpClient Client, AuthStatus Status)>> clientFactory) {
+            Func<CancellationToken, Task<AuthAttempt>> clientFactory) {
         if (!TryClaimDrainAttempt(lifecycle.Dir)) return; // throttled — a recent attempt already ran
 
         // Retention runs even when delivery cannot: the reap lives here, and Program.cs skips this
@@ -302,7 +303,7 @@ internal sealed class AgentHookPoster(ConfigRoot config, ProfileContext profiles
 
     /// <summary>Core with an injectable client factory (test seam).</summary>
     internal async Task<HookPostOutcome> PostOrSpoolAsync(
-            Func<Task<(HttpClient Client, AuthStatus Status)>> clientFactory,
+            Func<Task<AuthAttempt>> clientFactory,
             string endpoint, string body, string agentTag,
             HookSpool spool, string sessionId, string route) {
         var (client, status) = await clientFactory();

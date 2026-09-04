@@ -7,6 +7,8 @@ using Capacitor.Cli.Harness.Gemini;
 using Capacitor.Cli.SessionStartMemory;
 using Capacitor.Cli.Core.Harness;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands.Harness;
 
 /// <summary>
@@ -53,18 +55,17 @@ namespace Capacitor.Cli.Commands.Harness;
 /// <c>decision: "allow"</c> but ANY other code to <c>decision: "deny"</c>, which
 /// <c>isBlockingDecision()</c> honours — that is a BLOCKED session, not junk
 /// context. kcap stays out of that band only because <c>hook</c> is one of
-/// <c>CrashReporter.FailOpenCommands</c>, which is what turns
-/// <c>HttpClientExtensions.EnsureAbsolute</c>'s <c>Environment.Exit(2)</c> into a
-/// throw and makes Program.cs's top-level catch return 0. That set is load-bearing
-/// here; <c>GeminiHookOutputContractTests</c> pins it.
+/// <c>CrashReporter.FailOpenCommands</c>, which is what makes every top-level
+/// handler in Program.cs return 0 for it. That set is load-bearing here;
+/// <c>GeminiHookOutputContractTests</c> pins it.
 ///
 /// Behaviour above is measured on <c>gemini 0.53.0</c> — a version-specific
 /// observation, not a guarantee. The mitigation does not depend on it: emitting a
 /// valid non-blocking object is correct under any of these selection rules.
 /// </remarks>
-sealed class GeminiHookCommand(ConfigRoot config, ProfileContext profiles, HookClock clock, UserHome home) {
-    readonly WatcherManager  _watchers = new(config, profiles);
-    readonly AgentHookPoster _poster   = new(config, profiles);
+sealed class GeminiHookCommand(ConfigRoot config, ProfileContext profiles, HookClock clock, UserHome home, ICapacitorHttpClient http) {
+    readonly WatcherManager  _watchers = new(config, profiles, http);
+    readonly AgentHookPoster _poster   = new(config, profiles, http);
 
     string Url => profiles.Resolution.ServerUrl!;
 
@@ -178,7 +179,7 @@ sealed class GeminiHookCommand(ConfigRoot config, ProfileContext profiles, HookC
             // inject on an unverified reason AND spend the once-per-session lease on it.
             SessionStartMemoryHookSupport.ReasonFor(source), CallbackMayRepeat: false);
 
-    Task<string?> StartMemoryIndexTask(
+    async Task<string?> StartMemoryIndexTask(
             string     sessionId,
             string?    scopeRoot,
             bool       disabled,
@@ -187,22 +188,19 @@ sealed class GeminiHookCommand(ConfigRoot config, ProfileContext profiles, HookC
             TimeSpan   budget) {
         if ((disabled && guidelinesDisabled) || string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(scopeRoot)
          || budget <= TimeSpan.Zero
-         || !SessionStartMemoryHookSupport.CanAttempt(Url))
-            return Task.FromResult<string?>(null);
+         || !HookHttp.IsPostable(Url))
+            return null;
 
         try {
             var store    = SessionStartMemoryLeaseStore.Create(config, clock.Time);
-            var provider = SessionStartMemoryHookSupport.CompositeProvider(
-                config,
-                SessionStartMemoryHookSupport.ClientFactory(config, profiles, Url),
-                disposeClients: true);
+            var provider = SessionStartMemoryHookSupport.CompositeProvider(config, http.ForBackgroundAsync);
 
-            return new SessionStartMemoryOrchestrator(store, provider).GetFragmentAsync(
+            return await new SessionStartMemoryOrchestrator(store, provider).GetFragmentAsync(
                 LifecycleFor(sessionId, source),
                 new SessionStartMemoryContextRequest(Url, scopeRoot, disabled, budget, CancellationToken.None,
                     GuidelinesDisabled: guidelinesDisabled));
         } catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException) {
-            return Task.FromResult<string?>(null);
+            return null;
         }
     }
 
@@ -389,7 +387,7 @@ sealed class GeminiHookCommand(ConfigRoot config, ProfileContext profiles, HookC
                         // it (subagent-stop). Restart-safe — driven off the on-disk files,
                         // not an in-memory set. Shared with the watcher's parent-exit fallback
                         // so a crash that bypasses this hook still finalizes subagents.
-                        await new GeminiSubagentTeardown(config, profiles).DrainAsync(sessionId, transcriptPath);
+                        await new GeminiSubagentTeardown(config, profiles, http).DrainAsync(sessionId, transcriptPath);
                     },
                     PreHookDrainCap
                 );
@@ -446,9 +444,9 @@ sealed class GeminiHookCommand(ConfigRoot config, ProfileContext profiles, HookC
 
         using var cts = new CancellationTokenSource(NotificationPostBudget);
         try {
-            // Status-returning variant (not CreateAuthenticatedClientAsync, which writes a
-            // per-turn "expired" line to stderr): on a lapse, stay quiet and skip the doomed POST.
-            var (client, status) = await HttpClientExtensions.CreateClientWithAuthStatusAsync(config, profiles, Url, cts.Token);
+            // The hook verb, so a lapse writes nothing to stderr: stay quiet and skip the doomed
+            // POST rather than spend a per-turn line on it.
+            var (client, status) = await http.ForHookAsync(cts.Token);
             using (client) {
                 if (AgentHookPoster.IsAuthLapsed(status)) return 0;
                 using var content = new StringContent(forwarded.ToJsonString(), Encoding.UTF8, "application/json");

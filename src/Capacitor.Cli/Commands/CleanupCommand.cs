@@ -1,10 +1,12 @@
 using Capacitor.Cli.Core;
 using Capacitor.Cli.Core.Config;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands;
 
-sealed class CleanupCommand(ConfigRoot config, ProfileContext profiles) {
-    readonly WatcherManager _watchers = new(config, profiles);
+sealed class CleanupCommand(ConfigRoot config, ProfileContext profiles, ICapacitorHttpClient http) {
+    readonly WatcherManager _watchers = new(config, profiles, http);
 
     public async Task<int> HandleCleanup() {
         // Honor the KCAP_WATCHER_DIR override (via GetWatcherDir) so cleanup targets the same

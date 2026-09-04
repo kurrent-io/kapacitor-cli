@@ -8,7 +8,7 @@ public class WatcherDirTests {
     [TempConfigRoot] public required TempConfigRoot Config { get; init; }
 
     WatcherManager? _watchers;
-    WatcherManager  Watchers => _watchers ??= new(Config.Root, Resolutions.None(Config.Root));
+    WatcherManager  Watchers => _watchers ??= new(Config.Root, Resolutions.None(Config.Root), new FixedCapacitorHttpClient());
 
     [Test]
     public async Task It_sits_under_the_root_it_was_handed() {

@@ -10,10 +10,10 @@ namespace Capacitor.Cli.Tests.Unit.Commands;
 public class McpFlowsServerReviewerVendorsTests {
     [TempConfigRoot] public required TempConfigRoot Config { get; init; }
 
-    // Same shape as ReviewerVendorFallbackTests: the dispatch is profile-scoped, and these tests
-    // exercise routing, not profile selection.
+    // Resolutions.None: these tests exercise routing, not profile selection.
     McpFlowsServer Server() =>
-        new(Config.Root, Resolutions.None(Config.Root));
+        new(Config.Root, Resolutions.None(Config.Root), AuthFixtures.NewTokenStore(Config.Root),
+            new FixedCapacitorHttpClient());
 
     static JsonObject ToolCall() => new() {
         ["params"] = new JsonObject { ["name"] = "list_reviewer_vendors", ["arguments"] = new JsonObject() }

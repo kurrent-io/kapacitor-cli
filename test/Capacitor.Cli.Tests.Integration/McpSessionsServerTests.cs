@@ -73,9 +73,8 @@ public class McpSessionsServerTests : IDisposable {
     }
 
     /// <summary>
-    /// A scheme-less server_url would otherwise reach EnsureAbsolute inside the lazy auth-client
-    /// factory and hard-exit the process (Environment.Exit(2)) mid-request. The startup URL
-    /// guard turns it into a graceful JSON-RPC tool error, and the server keeps serving.
+    /// A scheme-less server_url fails the server's own <c>IsAcceptableUrl</c> pre-check, so the
+    /// dispatcher returns a JSON-RPC tool error before any client is built, and the server keeps serving.
     /// </summary>
     [Test]
     public async Task Tool_call_with_invalid_server_url_returns_error_and_server_survives() {
@@ -355,9 +354,8 @@ public class McpSessionsServerTests : IDisposable {
 
     /// <summary>
     /// Writes a non-expired token to the per-test config dir's token store so the
-    /// CLI's <c>HttpClientExtensions.CreateAuthenticatedClientAsync</c> attaches a
-    /// Bearer header. Exercises the long-lived-server path (the MCP server holds a
-    /// single HttpClient for the agent's whole session).
+    /// send-path handler attaches a Bearer header. Exercises the long-lived-server
+    /// path (the MCP server holds a single HttpClient for the agent's whole session).
     /// </summary>
     void SeedToken(string accessToken = "seed-token") {
         var tokensDir  = Config.Root.Path("tokens");
@@ -423,8 +421,8 @@ public class McpSessionsServerTests : IDisposable {
     /// <summary>
     /// On a 401, <see cref="Capacitor.Cli.Commands.McpSessionsServer"/> must surface the friendly
     /// message "Not logged in. Run 'kcap login' on the host shell." inside the tool result itself
-    /// — MCP clients don't forward CLI stderr to the model, so the stderr hint from
-    /// <c>HttpClientExtensions.CreateAuthenticatedClientAsync</c> would otherwise be invisible.
+    /// — MCP clients don't forward CLI stderr to the model, so <c>AuthRejectionNotice</c>'s message
+    /// would otherwise be invisible.
     /// The stub's 401 body is empty, so a non-empty message here can only come from this fallback.
     /// </summary>
     [Test]

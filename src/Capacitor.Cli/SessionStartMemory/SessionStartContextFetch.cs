@@ -12,52 +12,26 @@ namespace Capacitor.Cli.SessionStartMemory;
 internal readonly record struct SessionStartFetchOutcome(HttpStatusCode Status, byte[]? Body, TimeSpan? RetryAfter);
 
 /// <summary>
-/// Shared HTTP mechanics for the SessionStart context lanes: authenticated GET
-/// with a single 401-refresh retry (adopting a peer process's refreshed token
-/// rather than rotating a second time), a 256 KiB bounded body read on success,
-/// and <c>Retry-After</c> parsing. Extracted from
-/// <see cref="SessionStartMemoryContextProvider"/> so the memory and guidelines
-/// lanes share one implementation. Behaviour is byte-for-byte what the
-/// memory lane did before the extraction.
+/// Shared HTTP mechanics for the SessionStart context lanes: a GET read at
+/// <see cref="HttpCompletionOption.ResponseHeadersRead"/>, a 256 KiB bounded body read on success,
+/// and <c>Retry-After</c> parsing. The client arrives already carrying whatever credential its lane
+/// applies, and a 401 is recovered below this — so nothing here inspects auth.
 /// </summary>
 internal static class SessionStartContextFetch {
     public static async Task<SessionStartFetchOutcome> FetchAsync(
-            Func<string?, CancellationToken, Task<HttpClient>> clientFactory,
-            string url,
-            bool disposeClients,
-            CancellationToken ct) {
-        HttpClient? firstClient   = null;
-        HttpClient? refreshClient = null;
-        try {
-            firstClient  = await clientFactory(null, ct);
-            var response = await SendAsync(firstClient, url, ct);
-            if (response.StatusCode == HttpStatusCode.Unauthorized) {
-                response.Dispose();
-                // Retry against the token this client actually sent, so a peer process that
-                // refreshed in the meantime is adopted rather than rotated a second time. A
-                // null here (no token was attached) simply means there is nothing to force —
-                // the retry still picks up whatever is stored now.
-                var rejected  = firstClient.DefaultRequestHeaders.Authorization?.Parameter;
-                refreshClient = await clientFactory(rejected, ct);
-                response      = await SendAsync(refreshClient, url, ct);
-            }
-            using (response) {
-                var retryAfter = ParseRetryAfter(response);
-                if (!response.IsSuccessStatusCode)
-                    return new SessionStartFetchOutcome(response.StatusCode, Body: null, retryAfter);
-                var bytes = await ReadBoundedAsync(response.Content, ct);
-                return new SessionStartFetchOutcome(response.StatusCode, bytes, RetryAfter: null);
-            }
-        } finally {
-            if (disposeClients) {
-                firstClient?.Dispose();
-                if (!ReferenceEquals(firstClient, refreshClient)) refreshClient?.Dispose();
-            }
-        }
-    }
+            HttpClient client, string url, CancellationToken ct) {
+        // Headers-read, so the bounded read below decides how much of the body is ever pulled.
+        using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
 
-    static Task<HttpResponseMessage> SendAsync(HttpClient client, string url, CancellationToken ct) =>
-        client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+        var retryAfter = ParseRetryAfter(response);
+
+        if (!response.IsSuccessStatusCode)
+            return new SessionStartFetchOutcome(response.StatusCode, Body: null, retryAfter);
+
+        var bytes = await ReadBoundedAsync(response.Content, ct);
+
+        return new SessionStartFetchOutcome(response.StatusCode, bytes, RetryAfter: null);
+    }
 
     static async Task<byte[]> ReadBoundedAsync(HttpContent content, CancellationToken ct) {
         await using var stream = await content.ReadAsStreamAsync(ct);

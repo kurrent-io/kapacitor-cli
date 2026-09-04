@@ -88,10 +88,10 @@ public class GeminiHookOutputContractTests {
     ///
     /// <para>Gemini's plain-text fallback is not unconditionally benign: it maps exit 0 and 1 to
     /// <c>decision: "allow"</c> but ANY other code to <c>decision: "deny"</c>. kcap stays out of that band
-    /// only because <c>hook</c> is a fail-open command — which is what turns
-    /// <c>EnsureAbsolute</c>'s <c>Environment.Exit(2)</c> into a throw and makes the top-level catch
-    /// return 0. Drop <c>"hook"</c> from that set and a malformed <c>server_url</c> becomes a stderr
-    /// string that BLOCKS the Gemini session.</para>
+    /// only because <c>hook</c> is a fail-open command — <c>Program.cs</c>'s top-level
+    /// <c>UnusableServerUrlException</c> handler returns 0 for it instead of 2. Drop <c>"hook"</c>
+    /// from that set and a malformed <c>server_url</c> becomes an exit code that BLOCKS the Gemini
+    /// session.</para>
     /// </summary>
     [Test]
     public async Task The_hook_command_stays_out_of_geminis_blocking_exit_code_band() {
@@ -184,7 +184,8 @@ public class GeminiHookOutputContractTests {
 
         // A URL no POST can reach: these paths must all return before any network call, and a test
         // that quietly started talking to a live server would be measuring something else.
-        await new GeminiHookCommand(Config.Root, Resolutions.At("http://127.0.0.1:1", Config.Root), new HookClock(TimeProvider.System), Home).Handle(new StringReader(payload));
+        await new GeminiHookCommand(Config.Root, Resolutions.At("http://127.0.0.1:1", Config.Root),
+            new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).Handle(new StringReader(payload));
 
         return capture.GetCapturedOutput();
     }

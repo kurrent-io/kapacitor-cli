@@ -7,6 +7,8 @@ using Capacitor.Cli.Core.Harness;
 
 // ReSharper disable ShortLivedHttpClient
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands.Harness;
 
 /// <summary>
@@ -34,9 +36,9 @@ namespace Capacitor.Cli.Commands.Harness;
 ///   PreToolUse        → swallowed
 ///   PostToolUse       → swallowed
 /// </remarks>
-sealed class CodexHookCommand(ConfigRoot config, ProfileContext profiles, HookClock clock, UserHome home) {
-    readonly WatcherManager  _watchers = new(config, profiles);
-    readonly AgentHookPoster _poster   = new(config, profiles);
+sealed class CodexHookCommand(ConfigRoot config, ProfileContext profiles, HookClock clock, UserHome home, ICapacitorHttpClient http) {
+    readonly WatcherManager  _watchers = new(config, profiles, http);
+    readonly AgentHookPoster _poster   = new(config, profiles, http);
 
     string Url => profiles.Resolution.ServerUrl!;
 
@@ -117,26 +119,6 @@ sealed class CodexHookCommand(ConfigRoot config, ProfileContext profiles, HookCl
     }
 
     /// <summary>
-    /// Whether memory injection may attempt auth discovery for <paramref name="baseUrl"/> at all.
-    /// Guards the process-exiting URL validation inside the authenticated-client helper (see the
-    /// call-site comment): a blank or unacceptable URL must skip injection, never exit the hook.
-    /// </summary>
-    internal static bool CanAttemptMemoryInjection(string? baseUrl) => HookHttp.IsPostable(baseUrl);
-
-    /// <summary>
-    /// An AUTHENTICATED client that honours the provider's 401-refresh contract.
-    /// <c>/api/memories/index</c> is bearer-authenticated, and
-    /// <see cref="SessionStartMemoryContextProvider"/> hands the rejected bearer back here after a
-    /// 401 so a fresh client can be minted. A bare <c>new HttpClient()</c> would 401 on both the
-    /// initial call AND the refresh, the provider would record a retryable failure, and Codex would
-    /// silently never receive memory context on any authenticated deployment. Mirrors
-    /// <c>ClaudeHookCommand</c>'s factory.
-    /// </summary>
-    internal Func<string?, CancellationToken, Task<HttpClient>> DefaultMemoryClientFactory()
-        => async (rejectedAccessToken, ct) => (await HttpClientExtensions.CreateClientWithAuthStatusAsync(config,
-            profiles, Url, ct, allowAutoRedirect: false, rejectedAccessToken: rejectedAccessToken)).Client;
-
-    /// <summary>
     /// Starts the shared SessionStart memory fetch so it overlaps the lifecycle POST
     /// instead of serializing ahead of it — the same start-early/await-bounded shape
     /// <c>ClaudeHookCommand.StartMemoryIndexTask</c> uses. Returns a task that NEVER faults:
@@ -153,7 +135,7 @@ sealed class CodexHookCommand(ConfigRoot config, ProfileContext profiles, HookCl
     /// on a resume of the SAME session id is prevented by the shared lease keyed on
     /// (harness, session id) rather than by a reason we cannot observe.</para>
     /// </summary>
-    Task<string?> StartMemoryIndexTask(
+    async Task<string?> StartMemoryIndexTask(
             string?    sessionId,
             string?    scopeRoot,
             bool       disabled,
@@ -161,34 +143,26 @@ sealed class CodexHookCommand(ConfigRoot config, ProfileContext profiles, HookCl
             TimeSpan   budget) {
         if ((disabled && guidelinesDisabled) || string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(scopeRoot)
          || budget <= TimeSpan.Zero)
-            return Task.FromResult<string?>(null);
+            return null;
 
-        // MUST precede any auth discovery: the authenticated-client helper funnels through
-        // EnsureAbsolute, which prints a hint and calls Environment.Exit(2) on a URL it cannot
-        // accept. Exiting here would kill the hook BEFORE the stdout handshake, so Codex would see
-        // no output at all and reject the session — the opposite of fail-open, and strictly worse
-        // than skipping an optional memory fragment. Mirrors PostBestEffortAsync's guard.
-        if (!CanAttemptMemoryInjection(Url)) return Task.FromResult<string?>(null);
+        // A blank or unacceptable URL must skip injection here, before any client is built,
+        // rather than fail later mid-fetch. Mirrors PostBestEffortAsync's guard.
+        if (!HookHttp.IsPostable(Url)) return null;
 
         // Construction itself stays inside the fail-open boundary: store-root validation and
         // the injected client factory can throw synchronously.
         try {
-            var store = SessionStartMemoryLeaseStore.Create(config, clock.Time);
-            // Only clients WE created are ours to dispose; an injected factory's client is
-            // owned by its caller and may be handed back again on the 401-refresh call.
-            var provider = SessionStartMemoryHookSupport.CompositeProvider(
-                config,
-                DefaultMemoryClientFactory(),
-                disposeClients: true);
+            var store    = SessionStartMemoryLeaseStore.Create(config, clock.Time);
+            var provider = SessionStartMemoryHookSupport.CompositeProvider(config, http.ForBackgroundAsync);
 
-            return new SessionStartMemoryOrchestrator(store, provider).GetFragmentAsync(
+            return await new SessionStartMemoryOrchestrator(store, provider).GetFragmentAsync(
                 new SessionMemoryLifecycle(HarnessId.Codex, sessionId!, LifecycleInstanceId: null,
                     IsTopLevel: true, ClassificationAuthoritative: true, SessionLifecycleReason.New,
                     CallbackMayRepeat: false),
                 new SessionStartMemoryContextRequest(Url, scopeRoot, disabled, budget, CancellationToken.None,
                     GuidelinesDisabled: guidelinesDisabled));
         } catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException) {
-            return Task.FromResult<string?>(null);
+            return null;
         }
     }
 
@@ -541,14 +515,16 @@ sealed class CodexHookCommand(ConfigRoot config, ProfileContext profiles, HookCl
         return 0;
     }
 
-    static async Task<int> HandlePermissionRequestViaBridge(string daemonUrl, JsonNode node) {
+    async Task<int> HandlePermissionRequestViaBridge(string daemonUrl, JsonNode node) {
         if (!DaemonBridgeUrl.TryParseLoopback(daemonUrl, out var bridgeBase)) {
             Console.Error.WriteLine(
                 $"[kcap] codex-hook permission-request: KCAP_DAEMON_URL must be http loopback, got: {daemonUrl}");
             return EmitDenyAndExitNonzero();
         }
 
-        using var client = new HttpClient();
+        using var client = http.Loopback();
+        // The daemon holds the request open until the human decides, and Codex sets no timeout of
+        // its own on this hook, so the wait is theirs to end rather than the client's.
         client.Timeout = Timeout.InfiniteTimeSpan;
 
         try {
@@ -596,20 +572,18 @@ sealed class CodexHookCommand(ConfigRoot config, ProfileContext profiles, HookCl
     /// Callers that must satisfy Codex's stdout contract write their JSON output AFTER awaiting this.
     /// </summary>
     async Task PostBestEffortAsync(string endpoint, JsonNode node, TimeSpan cap) {
-        // A blank or non-absolute Url would trip EnsureAbsolute deep inside auth discovery,
-        // which calls Environment.Exit(2) — uncatchable, and would bypass the caller's stdout/exit
-        // contract. Bail silently before we can reach it.
-        if (string.IsNullOrWhiteSpace(Url) || !HttpClientExtensions.IsAcceptableUrl(Url)) {
+        // Silently, and before the deadline is armed: this method owes the caller no output, and a
+        // URL nothing can be sent to is not worth spending the cap discovering.
+        if (!HookHttp.IsPostable(Url)) {
             return;
         }
 
         using var cts = new CancellationTokenSource(cap);
 
         try {
-            // Use the status-returning variant, NOT CreateAuthenticatedClientAsync: the latter writes
-            // "Not authenticated" / "expired" to stderr, which a per-turn Stop would spam. Stay quiet
-            // and skip the POST when there's no usable auth (still swallow-all).
-            var (client, status) = await HttpClientExtensions.CreateClientWithAuthStatusAsync(config, profiles, Url, cts.Token);
+            // The hook verb, so a lapse writes nothing to stderr: a per-turn Stop would spam it, and
+            // Codex reads hook stderr as the hook's own result.
+            var (client, status) = await http.ForHookAsync(cts.Token);
 
             using (client) {
                 if (status is not (AuthStatus.Ok or AuthStatus.NoAuthRequired)) {

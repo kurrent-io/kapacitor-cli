@@ -1,6 +1,7 @@
 using Capacitor.Cli.Core;
 using Capacitor.Cli.Core.Config;
 using Capacitor.Cli.Core.Eval;
+using Capacitor.Cli.Core.Http;
 
 namespace Capacitor.Cli.Commands;
 
@@ -10,7 +11,7 @@ namespace Capacitor.Cli.Commands;
 /// terminal report. The eval pipeline itself lives in the Eval library so
 /// the daemon (DEV-1440 milestone 2) can reuse it.
 /// </summary>
-class EvalCommand(ConfigRoot config, ProfileContext profiles, UserHome home) {
+class EvalCommand(ProfileContext profiles, UserHome home, ICapacitorHttpClient http) {
     public async Task<int> HandleEval(
             string  sessionId,
             string  model,
@@ -20,7 +21,7 @@ class EvalCommand(ConfigRoot config, ProfileContext profiles, UserHome home) {
             string? skipCsv
         ) {
         var       baseUrl    = profiles.Resolution.ServerUrl!;
-        using var httpClient = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
+        using var httpClient = await http.ForCommandAsync();
 
         // Fetch taxonomy once up-front so --list and --questions/--skip share
         // the same source of truth; the server controls it (PR 1), not the CLI.
@@ -56,7 +57,7 @@ class EvalCommand(ConfigRoot config, ProfileContext profiles, UserHome home) {
 
     public async Task<int> HandleListQuestions() {
         var       baseUrl    = profiles.Resolution.ServerUrl!;
-        using var httpClient = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
+        using var httpClient = await http.ForCommandAsync();
         var observer = new ConsoleEvalObserver(sessionId: "");
         var catalog  = await EvalQuestionCatalogClient.FetchAsync(baseUrl, httpClient, observer, CancellationToken.None);
         if (catalog is null) return 1;

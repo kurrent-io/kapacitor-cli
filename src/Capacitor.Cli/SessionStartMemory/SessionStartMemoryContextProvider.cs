@@ -5,9 +5,8 @@ namespace Capacitor.Cli.SessionStartMemory;
 
 internal sealed class SessionStartMemoryContextProvider(
     ISessionStartMemoryScopeResolver scopeResolver,
-    Func<string?, CancellationToken, Task<HttpClient>> clientFactory,
-    Action<string>? diagnostic = null,
-    bool disposeClients = false) : ISessionStartContextProvider {
+    Func<CancellationToken, Task<HttpClient>> client,
+    Action<string>? diagnostic = null) : ISessionStartContextProvider {
 
     public async Task<SessionStartMemoryContextResult> GetAsync(SessionStartMemoryContextRequest request) {
         if (request.Disabled) return SessionStartMemoryContextResult.Empty;
@@ -35,7 +34,7 @@ internal sealed class SessionStartMemoryContextProvider(
     public async Task<SessionStartMemoryContextResult> FetchWithScopeAsync(
             SessionStartMemoryScope scope, SessionStartMemoryContextRequest request, CancellationToken ct) {
         var outcome = await SessionStartContextFetch.FetchAsync(
-            clientFactory, BuildUrl(request.BaseUrl, scope), disposeClients, ct);
+            await client(ct), BuildUrl(request.BaseUrl, scope), ct);
 
         if (outcome.Status == HttpStatusCode.NoContent) return SessionStartMemoryContextResult.Empty;
         if (outcome.Status is HttpStatusCode.BadRequest or HttpStatusCode.NotFound) {

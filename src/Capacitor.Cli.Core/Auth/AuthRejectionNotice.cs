@@ -130,9 +130,9 @@ public static class AuthRejectionNotice {
     /// replacing an auth diagnosis with an IO stack trace.
     /// </summary>
     public static async Task<string> ForPersistentUnauthorizedAsync(
-            ConfigRoot config, string profile, string targetBaseUrl, CancellationToken ct = default) {
+            TokenStore store, string profile, string targetBaseUrl, CancellationToken ct = default) {
         try {
-            var stored = await new TokenStore(config).LoadForProfileAsync(profile, ct);
+            var stored = await store.LoadForProfileAsync(profile, ct);
 
             return Render(Classify(stored, targetBaseUrl), stored, targetBaseUrl);
         } catch {

@@ -29,8 +29,6 @@ public class EvalRunnerV2PostTests : IDisposable {
 
     [Test]
     public async Task Daemon_persists_aggregate_to_v2_route_with_structured_suggestions() {
-        // Auth discovery: tests don't have real tokens; CreateAuthenticatedClientAsync
-        // is bypassed because we construct the HttpClient directly here.
         _server.Given(Request.Create().WithPath("/api/sessions/sess-1/evals/v2").UsingPost())
                .RespondWith(Response.Create().WithStatusCode(200));
 

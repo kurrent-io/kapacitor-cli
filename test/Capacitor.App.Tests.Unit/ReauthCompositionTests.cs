@@ -25,8 +25,10 @@ public class ReauthCompositionTests {
             ConnectIntent? seen = null;
 
             var graph = ReauthComposition.Build(
-                config.Root, "default", ServerUrl,
-                WizardComposition.BuildBridges(action => action()),
+                config.Root, AuthFixtures.NewTokenStore(config.Root), new PlainHttpClientFactory(),
+                new AuthProxyClient(new HttpClient()), new(new PlainHttpClientFactory()), new(new PlainHttpClientFactory()),
+                "default", ServerUrl,
+                WizardComposition.BuildBridges(action => action(), new(new HttpClient())),
                 new ConsentFlipClaims(config.Root),
                 new AppStateStore(config.PathTo("app-state.json")),
                 new RecordingOpener(),
@@ -50,8 +52,10 @@ public class ReauthCompositionTests {
             var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
             var graph = ReauthComposition.Build(
-                config.Root, "default", ServerUrl,
-                WizardComposition.BuildBridges(action => action()),
+                config.Root, AuthFixtures.NewTokenStore(config.Root), new PlainHttpClientFactory(),
+                new AuthProxyClient(new HttpClient()), new(new PlainHttpClientFactory()), new(new PlainHttpClientFactory()),
+                "default", ServerUrl,
+                WizardComposition.BuildBridges(action => action(), new(new HttpClient())),
                 new ConsentFlipClaims(config.Root),
                 new AppStateStore(config.PathTo("app-state.json")),
                 new RecordingOpener(),
@@ -80,8 +84,10 @@ public class ReauthCompositionTests {
         var (buttonFound, status) = await AvaloniaSession.DispatchAsync(() => {
             using var config = new TempConfigRoot();
             var graph = ReauthComposition.Build(
-                config.Root, "default", ServerUrl,
-                WizardComposition.BuildBridges(action => action()),
+                config.Root, AuthFixtures.NewTokenStore(config.Root), new PlainHttpClientFactory(),
+                new AuthProxyClient(new HttpClient()), new(new PlainHttpClientFactory()), new(new PlainHttpClientFactory()),
+                "default", ServerUrl,
+                WizardComposition.BuildBridges(action => action(), new(new HttpClient())),
                 new ConsentFlipClaims(config.Root),
                 new AppStateStore(config.PathTo("app-state.json")),
                 new RecordingOpener(),

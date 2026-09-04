@@ -988,6 +988,7 @@ public class AgentOrchestratorLocalAttachTests {
     /// invoke none of them — the test asserts Calls is empty.
     sealed class TripwireServerConnection() : ServerConnection(
         new() { Name = "test", ServerUrl = "http://127.0.0.1:1" },
+        UnusedTokenStore.Create(),
         NullLoggerFactory.Instance,
         NullLogger<ServerConnection>.Instance
     ) {

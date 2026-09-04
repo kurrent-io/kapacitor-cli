@@ -9,6 +9,8 @@ using Capacitor.Cli.Harness.Cursor;
 using Capacitor.Cli.SessionStartMemory;
 using Capacitor.Cli.Core.Harness;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands.Harness;
 
 /// <summary>
@@ -19,8 +21,8 @@ namespace Capacitor.Cli.Commands.Harness;
 /// shared 2-second wall-clock budget, a per-session canonical-event
 /// spool, and a watermark-driven transcript-line backfill.
 /// </summary>
-public sealed class CursorHookCommand(ConfigRoot config, ProfileContext profiles, HookClock clock, UserHome home) {
-    readonly WatcherManager _watchers = new(config, profiles);
+public sealed class CursorHookCommand(ConfigRoot config, ProfileContext profiles, HookClock clock, UserHome home, ICapacitorHttpClient http) {
+    readonly WatcherManager _watchers = new(config, profiles, http);
     readonly CursorMarkers  _markers  = new(config);
 
     string Url => profiles.Resolution.ServerUrl!;
@@ -76,7 +78,7 @@ public sealed class CursorHookCommand(ConfigRoot config, ProfileContext profiles
     /// </summary>
     internal Task<int> HandleInternal(TextReader stdin) =>
         HandleWithDeps(stdin,
-            ct => HttpClientExtensions.CreateClientWithAuthStatusAsync(config, profiles, Url, ct),
+            http.ForHookAsync,
             () => {
                 var s = new HookSpool(config);
                 MigrateLegacyCursorSpool(s, CursorHarness.FromEnvironment(home).Paths.SpoolDir);
@@ -92,7 +94,7 @@ public sealed class CursorHookCommand(ConfigRoot config, ProfileContext profiles
     /// </summary>
     internal async Task<int> HandleWithDeps(
             TextReader stdin,
-            Func<CancellationToken, Task<(HttpClient Client, AuthStatus Status)>> clientFactory,
+            Func<CancellationToken, Task<AuthAttempt>> clientFactory,
             Func<HookSpool> spoolFactory
         ) {
         // At this point the event kind and session id are not yet parsed, so there is nothing to spool
@@ -109,11 +111,10 @@ public sealed class CursorHookCommand(ConfigRoot config, ProfileContext profiles
         using var cts = budget.CancelAtCeiling();
         HttpClient? client = null;
         try {
-            // Status-returning variant so a lapse doesn't write the per-turn "expired" stderr
-            // line CreateAuthenticatedClientAsync would. On a lapse, skip HandleCore entirely:
-            // every POST would 401, so the backlog waits intact for the user to re-run
-            // `kcap login`, and exit cleanly. Mirrors the Claude hook; kcap status surfaces the
-            // expired state. Cursor has no user-facing notice channel.
+            // The hook verb, so a lapse writes nothing to stderr. On a lapse, skip HandleCore
+            // entirely: every POST would 401, so the backlog waits intact for the user to
+            // re-run `kcap login`, and exit cleanly. Mirrors the Claude hook; kcap status
+            // surfaces the expired state. Cursor has no user-facing notice channel.
             //
             // Bounded by its OWN Task.WhenAny against the full budget (not merely the linked
             // CancellationToken passed into it) — the one place client creation can be
@@ -580,12 +581,8 @@ public sealed class CursorHookCommand(ConfigRoot config, ProfileContext profiles
             using var memCts    = CancellationTokenSource.CreateLinkedTokenSource(dispatcherCt, budgetCts.Token);
 
             var store = SessionStartMemoryLeaseStore.Create(config, clock.Time);
-            // Both lanes share the hook's own client, which is caller-owned — hence disposeClients
-            // false, the inverse of the adapters that mint one of their own.
-            var provider = SessionStartMemoryHookSupport.CompositeProvider(
-                config,
-                (_, _) => Task.FromResult(client),
-                disposeClients: false);
+            // Both lanes send on the hook's own client, which stays this method's caller's to dispose.
+            var provider = SessionStartMemoryHookSupport.CompositeProvider(config, _ => Task.FromResult(client));
 
             return await new SessionStartMemoryOrchestrator(store, provider).GetFragmentAsync(
                 // ClassificationAuthoritative is hardcoded true, and this is VALID UNDER THE

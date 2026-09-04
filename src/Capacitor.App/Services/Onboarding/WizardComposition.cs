@@ -12,6 +12,11 @@ namespace Capacitor.App.Services.Onboarding;
 /// which picker, whether a provisioner is armed, which before-commit hook — are inspectable.
 internal sealed record WizardFacadeSpec(
     ConfigRoot                                                 Root,
+    TokenStore                                                 TokenStore,
+    IHttpClientFactory                                         HttpFactory,
+    IAuthProxyClient                                           Proxy,
+    GitHubOAuthClient                                          GitHub,
+    WorkOSClient                                               WorkOS,
     string                                                     Profile,
     IAuthProgress                                              Progress,
     ITenantPicker                                              Picker,
@@ -29,6 +34,11 @@ internal sealed record WizardGraph(
 /// <summary>Everything wizard-first mode is composed from; the daemon-facing entries are factories so a call never lands on a stale daemon.</summary>
 internal sealed record WizardGraphOptions(
     ConfigRoot                                                                   Root,
+    TokenStore                                                                   TokenStore,
+    IHttpClientFactory                                                           HttpFactory,
+    IAuthProxyClient                                                             Proxy,
+    GitHubOAuthClient                                                            GitHub,
+    WorkOSClient                                                                 WorkOS,
     string                                                                       Profile,
     ConsentFlipClaims                                                            Claims,
     WizardBridges                                                                Bridges,
@@ -64,29 +74,34 @@ internal static class WizardComposition {
 
     /// Production bridges: one marshalling boundary (Avalonia's dispatcher in the app) and a
     /// provisioner built from the bridges' OWN sink, per WizardBridges' contract.
-    internal static WizardBridges BuildBridges(Action<Action> post) =>
+    internal static WizardBridges BuildBridges(Action<Action> post, TenantProvisioningClient provisioning) =>
         new(post, progress => new WizardTenantProvisioner(
-            new TenantProvisioningClient(new HttpClient()), ProvisioningEndpoint.Url, progress));
+            provisioning, ProvisioningEndpoint.Url, progress));
 
     /// Production operation: the spec IS the façade's arguments, and WizardSignInOperation owns
     /// the intent→call map (paste adopts the server; create/discover run WorkOS discovery).
     internal static Func<ConnectIntent, CancellationToken, Task<AuthResult>> NewOperation(WizardFacadeSpec spec) =>
         WizardSignInOperation.For(new OnboardingFacade(
-            spec.Root, spec.Progress, SystemBrowser.Instance, spec.Picker, spec.Provisioner, spec.BeforeCommit), spec.Profile);
+            spec.Root, spec.TokenStore, spec.HttpFactory, spec.Proxy, spec.GitHub, spec.WorkOS, spec.Progress,
+            SystemBrowser.Instance, spec.Picker, spec.Provisioner, spec.BeforeCommit), spec.Profile);
 
     /// The ONE façade a wizard run signs in through — provisioner armed (a provisioner-less façade
     /// dead-ends "Create a workspace" at "ask your admin") and the decision-7 arming hook wired as
     /// before-commit, so a claim exists before anything durable is published.
     internal static Func<ConnectIntent, CancellationToken, Task<AuthResult>> BuildOperation(
-            ConfigRoot root, string profile, WizardBridges bridges, ConsentFlipClaims claims,
+            ConfigRoot root, TokenStore tokenStore, IHttpClientFactory httpFactory, IAuthProxyClient proxy,
+            GitHubOAuthClient github, WorkOSClient workos,
+            string profile, WizardBridges bridges, ConsentFlipClaims claims,
             Func<WizardFacadeSpec, Func<ConnectIntent, CancellationToken, Task<AuthResult>>> operation) =>
         operation(new WizardFacadeSpec(
-            root, profile, bridges.Progress, bridges.Picker, bridges.Provisioner, WizardAuthService.ArmingHook(claims)));
+            root, tokenStore, httpFactory, proxy, github, workos, profile, bridges.Progress, bridges.Picker,
+            bridges.Provisioner, WizardAuthService.ArmingHook(claims)));
 
     internal static WizardGraph BuildGraph(WizardGraphOptions options) {
         var claims = options.Claims;
         var cli    = new LateBoundKcapCli(options.ResolveCli, options.CliPath);
-        var auth   = new WizardAuthService(BuildOperation(options.Root, options.Profile, options.Bridges, claims, options.Operation));
+        var auth   = new WizardAuthService(BuildOperation(options.Root, options.TokenStore, options.HttpFactory, options.Proxy,
+        options.GitHub, options.WorkOS, options.Profile, options.Bridges, claims, options.Operation));
 
         var connect  = new ConnectStepViewModel();
         var signIn   = new SignInStepViewModel(auth, connect, options.Bridges, claims, options.AppState, options.UrlOpener);

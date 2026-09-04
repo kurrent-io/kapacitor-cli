@@ -10,7 +10,10 @@ namespace Capacitor.Cli.Commands;
 /// message is already rendered through the facade's <see cref="IAuthProgress"/> sink; this layer
 /// only maps the result to an exit code and, on the discover path, appends today's final line.
 /// </summary>
-public sealed class LoginCommand(ConfigRoot config, ProfileContext profiles, IBrowserLauncher browser) {
+public sealed class LoginCommand(
+        ConfigRoot config, ProfileContext profiles, TokenStore tokens, IHttpClientFactory httpFactory,
+        IAuthProxyClient proxy, GitHubOAuthClient github, WorkOSClient workos, IBrowserLauncher browser,
+        TenantProvisioningClient provisioning) {
     public Task<int> HandleAsync(string[] args, string? baseUrl) =>
         HandleAsync(args, baseUrl, profiles.Name, NewFacade(), ConsoleAuthProgress.Instance);
 
@@ -74,11 +77,11 @@ public sealed class LoginCommand(ConfigRoot config, ProfileContext profiles, IBr
     /// told to ask an admin.
     /// </summary>
     OnboardingFacade NewFacade() =>
-        new(config, ConsoleAuthProgress.Instance, browser,
+        new(config, tokens, httpFactory, proxy, github, workos, ConsoleAuthProgress.Instance, browser,
             // The same composite `kcap setup` uses: one operation must not behave differently
             // for being reached by a different command.
             new BrowserTenantPicker(browser, new SpectreTenantPicker(), ConsoleAuthProgress.Instance),
-            new SpectreTenantProvisioner(new TenantProvisioningClient(new HttpClient()), ProvisioningEndpoint.Url),
+            new SpectreTenantProvisioner(provisioning, ProvisioningEndpoint.Url),
             beforeCommit: null) {
             KeyWatcher = ConsoleKeyWatcher.Instance
         };

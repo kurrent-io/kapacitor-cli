@@ -256,9 +256,11 @@ internal sealed class CursorImportSource : IImportSource {
         // workspace gets its own path map and its own Correlate() call; the resulting links are
         // merged (session ids are unique across workspaces, so no collisions).
         var pathBySession      = new Dictionary<string, string>(StringComparer.Ordinal); // flat, for child-path lookups only
-        var pathsByWorkspace   = new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
+        // Keyed on the parts, not a joined string: (dir, null) for a real workspace and (null, id)
+        // for a synthetic bucket cannot collide, whatever a directory happens to be called.
+        var pathsByWorkspace   = new Dictionary<(string? SanitizedDir, string? SessionId), Dictionary<string, string>>();
 
-        Dictionary<string, string> WorkspaceMap(string key) {
+        Dictionary<string, string> WorkspaceMap((string? SanitizedDir, string? SessionId) key) {
             if (!pathsByWorkspace.TryGetValue(key, out var map))
                 pathsByWorkspace[key] = map = new Dictionary<string, string>(StringComparer.Ordinal);
             return map;
@@ -271,7 +273,7 @@ internal sealed class CursorImportSource : IImportSource {
             .Distinct(StringComparer.Ordinal);
 
         foreach (var sanitizedDir in sanitizedDirs) {
-            var workspaceMap = WorkspaceMap(sanitizedDir);
+            var workspaceMap = WorkspaceMap((sanitizedDir, null));
             foreach (var (sid, path) in DiscoverSameWorkspaceSessionPaths(sanitizedDir, ct)) {
                 workspaceMap[sid] = path;
                 pathBySession[sid] = path;
@@ -287,9 +289,10 @@ internal sealed class CursorImportSource : IImportSource {
             if (!s.SourceMeta!.TryGetValue("TranscriptPath", out var tp) || tp is not string p || p.Length == 0)
                 continue;
 
-            var workspaceKey = s.SourceMeta!.TryGetValue("SanitizedDir", out var sd) && sd is string sdStr
-                ? sdStr
-                : $" single:{s.SessionId}";
+            (string? SanitizedDir, string? SessionId) workspaceKey =
+                s.SourceMeta!.TryGetValue("SanitizedDir", out var sd) && sd is string sdStr
+                    ? (sdStr, null)
+                    : (null, s.SessionId);
 
             WorkspaceMap(workspaceKey)[s.SessionId] = p;
             pathBySession[s.SessionId] = p;

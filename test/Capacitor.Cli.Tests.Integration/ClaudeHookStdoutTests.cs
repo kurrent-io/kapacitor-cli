@@ -59,7 +59,7 @@ public class ClaudeHookStdoutTests : IDisposable {
     // concurrently-running test writes to Console can contaminate it.
     async Task<string> RunSessionStartAsync() {
         var stdout = new StringWriter();
-        await new ClaudeHookCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), new HookClock(TimeProvider.System), Home).Handle(new StringReader(SessionStartPayloadWithoutTranscriptPath()), stdout: stdout);
+        await new ClaudeHookCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).Handle(new StringReader(SessionStartPayloadWithoutTranscriptPath()), stdout: stdout);
         return stdout.ToString();
     }
 

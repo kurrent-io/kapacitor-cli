@@ -71,7 +71,8 @@ public class ImportSkipTitleTests : IDisposable {
             [.. Enumerable.Range(0, 20).Select(i =>
                 $$$"""{"type":"user","timestamp":"2026-03-15T10:00:00Z","cwd":"/tmp/skip-title-proj","message":{"content":"add a retry to the import loop {{{i}}}"}}""")]);
 
-        return new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home).HandleImport(
+        return new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home, new FixedCapacitorHttpClient())
+            .HandleImport(
             filterCwd:        null,
             minLines:         1,
             sources:          [new ClaudeImportSource(Config.Root, projectsDir.Path)],

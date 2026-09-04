@@ -73,9 +73,11 @@ public class WizardCompositionHappyPathTests {
         using var authHandler = new WizardCompositionFixtures.NoneProviderAuthHandler();
 
         var options = harness.Options() with {
+            HttpFactory = new PlainHttpClientFactory(authHandler),
+            Proxy       = new AuthProxyClient(new HttpClient(authHandler, disposeHandler: false)),
             Operation = spec => WizardSignInOperation.For(new OnboardingFacade(
-                spec.Root, spec.Progress, new RecordingBrowser(), spec.Picker, spec.Provisioner, spec.BeforeCommit,
-                () => new HttpClient(authHandler, false)), spec.Profile),
+                spec.Root, spec.TokenStore, spec.HttpFactory, spec.Proxy, spec.GitHub, spec.WorkOS, spec.Progress,
+                new RecordingBrowser(), spec.Picker, spec.Provisioner, spec.BeforeCommit), spec.Profile),
         };
 
         var summary = await AvaloniaSession.DispatchAsync(async () => {

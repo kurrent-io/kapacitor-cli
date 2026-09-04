@@ -17,15 +17,15 @@ namespace Capacitor.Cli.Daemon.Services;
 internal partial class ServerConnection : IAsyncDisposable, IDaemonHeartbeatPort {
     readonly HubConnection             _hub;
     readonly DaemonConfig              _config;
+    readonly TokenStore                _tokens;
     readonly ILogger<ServerConnection> _logger;
     readonly RegistrationGate          _gate                = new();
     readonly PendingPermissionRegistry _pendingPermissions  = new();
     readonly PendingAcpInteractionRegistry _pendingAcpInteractions = new();
 
-    // The change-generation counter behind the DaemonStatus push. Optional ctor param so the
-    // existing direct-construction sites (and DI, which resolves an optional parameter to a
-    // registered singleton when one exists) keep compiling unchanged; several test files
-    // subclass ServerConnection calling the 3-arg base, which the trailing default preserves.
+    // The change-generation counter behind the DaemonStatus push. Optional so a subclass can
+    // construct without naming one, and so DI still resolves the registered singleton when
+    // one exists.
     readonly DaemonStatusNotifier _statusNotifier;
 
     /// <summary>Test seam: exposes which notifier this connection actually pulses into, so a DI
@@ -197,9 +197,10 @@ internal partial class ServerConnection : IAsyncDisposable, IDaemonHeartbeatPort
     }
 
     public ServerConnection(
-            DaemonConfig config, ILoggerFactory loggerFactory, ILogger<ServerConnection> logger,
-            DaemonStatusNotifier? statusNotifier = null) {
+            DaemonConfig config, TokenStore tokens, ILoggerFactory loggerFactory,
+            ILogger<ServerConnection> logger, DaemonStatusNotifier? statusNotifier = null) {
         _config          = config;
+        _tokens          = tokens;
         _logger          = logger;
         _statusNotifier  = statusNotifier ?? new();
 
@@ -208,7 +209,7 @@ internal partial class ServerConnection : IAsyncDisposable, IDaemonHeartbeatPort
                 $"{config.ServerUrl.TrimEnd('/')}/hubs/sessions",
                 options => {
                     options.AccessTokenProvider = async () => {
-                        var resolution = await new TokenStore(config.ConfigRoot).GetValidTokensForServerAsync(config.Profiles.Name, config.ServerUrl);
+                        var resolution = await tokens.GetValidTokensForServerAsync(config.Profiles.Name, config.ServerUrl);
 
                         return resolution.Tokens?.AccessToken;
                     };
@@ -976,8 +977,7 @@ internal partial class ServerConnection : IAsyncDisposable, IDaemonHeartbeatPort
 
         _httpClient ??= new();
 
-        var resolution = await new TokenStore(_config.ConfigRoot)
-            .GetValidTokensForServerAsync(_config.Profiles.Name, _config.ServerUrl, ct);
+        var resolution = await _tokens.GetValidTokensForServerAsync(_config.Profiles.Name, _config.ServerUrl, ct);
 
         if (resolution.Tokens?.AccessToken is not null)
             _httpClient.DefaultRequestHeaders.Authorization = new("Bearer", resolution.Tokens.AccessToken);
@@ -1574,7 +1574,7 @@ internal partial class ServerConnection : IAsyncDisposable, IDaemonHeartbeatPort
                 while (!ct.IsCancellationRequested) {
                     try {
                         _httpClient ??= new();
-                        var resolution = await new TokenStore(_config.ConfigRoot).GetValidTokensForServerAsync(_config.Profiles.Name, _config.ServerUrl, ct);
+                        var resolution = await _tokens.GetValidTokensForServerAsync(_config.Profiles.Name, _config.ServerUrl, ct);
 
                         if (resolution.Tokens?.AccessToken is not null) {
                             _httpClient.DefaultRequestHeaders.Authorization = new("Bearer", resolution.Tokens.AccessToken);

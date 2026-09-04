@@ -1,64 +1,42 @@
-using System.Net;
 using System.Text;
-using System.Text.Json;
-using Capacitor.Cli.Commands.Harness;
 using Capacitor.Cli.Core;
-using Capacitor.Cli.Core.Config;
+using Capacitor.Cli.Core.Http;
 
 namespace Capacitor.Cli.Commands;
 
-class ValidatePlanCommand(ConfigRoot config, ProfileContext profiles) {
-    public async Task<int> Handle(string sessionId) {
-        var       baseUrl    = profiles.Resolution.ServerUrl!;
-        using var httpClient = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
-
-        return await HandleCore(httpClient, baseUrl, sessionId);
-    }
+class ValidatePlanCommand(ISessionsApi sessionsApi) {
+    public Task<int> Handle(string sessionId) => HandleCore(sessionsApi, sessionId);
 
     /// <summary>
-    /// Test-friendly core: caller owns the <see cref="HttpClient"/> (mirrors
-    /// <see cref="ClaudeHookCommand.HandleCore"/>'s seam). Two-call flow:
-    /// <c>GET /api/sessions/{id}/plan-artifacts?chain=true</c> for the discovered plan
-    /// artifact set, then the existing <c>GET /api/sessions/{id}/recap?chain=true</c> for
+    /// Test-friendly core: caller owns the <see cref="ISessionsApi"/>. Two-call flow:
+    /// the discovered plan artifact set, then the existing chain-widened recap for
     /// current-session work rows and AI-generated "what's done" summaries. A 404 on the
     /// artifacts route (old server without the route, or a non-visible session) falls back
     /// to <see cref="RenderLegacyAsync"/> — the original recap-only behavior, unchanged.
     /// Exit codes: 0 for a normal render or "no plan found" (absence is a valid answer); 2
     /// when the PRIMARY artifact's content is unavailable (validation genuinely isn't
-    /// possible); 1 for transport/HTTP errors.
+    /// possible); 1 for a refused or unreachable server.
     /// </summary>
-    internal static async Task<int> HandleCore(HttpClient httpClient, string baseUrl, string sessionId) {
-        HttpResponseMessage artifactsResp;
+    internal static async Task<int> HandleCore(ISessionsApi sessionsApi, string sessionId) {
+        PlanArtifactsResult artifactsResult;
 
         try {
-            artifactsResp = await httpClient.GetWithRetryAsync($"{baseUrl}/api/sessions/{sessionId}/plan-artifacts?chain=true");
-        } catch (HttpRequestException ex) {
-            HttpClientExtensions.WriteUnreachableError(baseUrl, ex);
+            artifactsResult = await sessionsApi.GetPlanArtifactsAsync(sessionId);
+        } catch (CapacitorApiException ex) {
+            await Console.Error.WriteLineAsync(ex.Message);
 
             return 1;
         }
 
-        if (await HttpClientExtensions.HandleUnauthorizedAsync(artifactsResp)) {
-            return 1;
-        }
-
-        if (artifactsResp.StatusCode == HttpStatusCode.NotFound) {
+        if (artifactsResult is PlanArtifactsResult.NotFound) {
             // Older server without the route, or the session/candidate isn't visible —
             // preserve the original recap-only behavior byte-for-byte.
-            return await RenderLegacyAsync(httpClient, baseUrl, sessionId);
+            return await RenderLegacyAsync(sessionsApi, sessionId);
         }
 
-        if (!artifactsResp.IsSuccessStatusCode) {
-            await Console.Error.WriteLineAsync($"HTTP {(int)artifactsResp.StatusCode}");
-
-            return 1;
-        }
-
-        var artifactsJson     = await artifactsResp.Content.ReadAsStringAsync();
-        var artifactsResponse = JsonSerializer.Deserialize(artifactsJson, CapacitorJsonContext.Default.PlanArtifactsResponseDto);
-
-        var primary   = artifactsResponse?.Primary;
-        var artifacts = artifactsResponse?.Artifacts ?? [];
+        var response  = ((PlanArtifactsResult.Found)artifactsResult).Response;
+        var primary   = response?.Primary;
+        var artifacts = response?.Artifacts ?? [];
 
         if (primary is null && artifacts.Count == 0) {
             await Console.Out.WriteLineAsync("No plan found for this session.");
@@ -68,34 +46,23 @@ class ValidatePlanCommand(ConfigRoot config, ProfileContext profiles) {
 
         // Work done + AI summaries still come from the existing recap endpoint — the
         // plan-artifacts route only carries the discovered plan/spec/design/checklist set.
-        HttpResponseMessage recapResp;
+        RecapResult recapResult;
 
         try {
-            recapResp = await httpClient.GetWithRetryAsync($"{baseUrl}/api/sessions/{sessionId}/recap?chain=true");
-        } catch (HttpRequestException ex) {
-            HttpClientExtensions.WriteUnreachableError(baseUrl, ex);
+            recapResult = await sessionsApi.GetRecapAsync(sessionId, chain: true);
+        } catch (CapacitorApiException ex) {
+            await Console.Error.WriteLineAsync(ex.Message);
 
             return 1;
         }
 
-        if (await HttpClientExtensions.HandleUnauthorizedAsync(recapResp)) {
-            return 1;
-        }
-
-        if (recapResp.StatusCode == HttpStatusCode.NotFound) {
+        if (recapResult is RecapResult.NotFound) {
             await Console.Error.WriteLineAsync($"Session not found: {sessionId}");
 
             return 1;
         }
 
-        if (!recapResp.IsSuccessStatusCode) {
-            await Console.Error.WriteLineAsync($"HTTP {(int)recapResp.StatusCode}");
-
-            return 1;
-        }
-
-        var recapJson = await recapResp.Content.ReadAsStringAsync();
-        var entries   = JsonSerializer.Deserialize(recapJson, CapacitorJsonContext.Default.ListRecapEntry) ?? [];
+        var entries = ((RecapResult.Found)recapResult).Entries;
 
         // Work done: only from the current session being validated (matches the legacy filter).
         var work      = entries.Where(e => e.Type is "write" or "edit" && e.SessionId == sessionId).ToList();
@@ -246,37 +213,26 @@ class ValidatePlanCommand(ConfigRoot config, ProfileContext profiles) {
     /// route can't resolve). Plans come from <c>recap</c> entries of type "plan" across the
     /// session chain; work/summaries are filtered exactly as before.
     /// </summary>
-    static async Task<int> RenderLegacyAsync(HttpClient httpClient, string baseUrl, string sessionId) {
-        HttpResponseMessage resp;
+    static async Task<int> RenderLegacyAsync(ISessionsApi sessionsApi, string sessionId) {
+        RecapResult result;
 
         try {
-            resp = await httpClient.GetWithRetryAsync($"{baseUrl}/api/sessions/{sessionId}/recap?chain=true");
-        } catch (HttpRequestException ex) {
-            HttpClientExtensions.WriteUnreachableError(baseUrl, ex);
+            result = await sessionsApi.GetRecapAsync(sessionId, chain: true);
+        } catch (CapacitorApiException ex) {
+            await Console.Error.WriteLineAsync(ex.Message);
 
             return 1;
         }
 
-        if (await HttpClientExtensions.HandleUnauthorizedAsync(resp)) {
-            return 1;
-        }
-
-        if (resp.StatusCode == HttpStatusCode.NotFound) {
+        if (result is RecapResult.NotFound) {
             await Console.Error.WriteLineAsync($"Session not found: {sessionId}");
 
             return 1;
         }
 
-        if (!resp.IsSuccessStatusCode) {
-            await Console.Error.WriteLineAsync($"HTTP {(int)resp.StatusCode}");
+        var entries = ((RecapResult.Found)result).Entries;
 
-            return 1;
-        }
-
-        var json    = await resp.Content.ReadAsStringAsync();
-        var entries = JsonSerializer.Deserialize(json, CapacitorJsonContext.Default.ListRecapEntry);
-
-        if (entries is null || entries.Count == 0) {
+        if (entries.Count == 0) {
             await Console.Out.WriteLineAsync("No plan found for this session.");
 
             return 0;

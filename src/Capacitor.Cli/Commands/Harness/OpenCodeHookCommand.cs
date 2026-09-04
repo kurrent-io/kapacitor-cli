@@ -4,6 +4,8 @@ using Capacitor.Cli.Core.Config;
 using Capacitor.Cli.SessionStartMemory;
 using Capacitor.Cli.Core.Harness;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands.Harness;
 
 /// <summary>
@@ -27,9 +29,9 @@ namespace Capacitor.Cli.Commands.Harness;
 ///
 /// Fail-open throughout — a kcap/server problem must never disrupt the OpenCode session.
 /// </summary>
-sealed class OpenCodeHookCommand(ConfigRoot config, ProfileContext profiles, HookClock clock, UserHome home) {
-    readonly WatcherManager  _watchers = new(config, profiles);
-    readonly AgentHookPoster _poster   = new(config, profiles);
+sealed class OpenCodeHookCommand(ConfigRoot config, ProfileContext profiles, HookClock clock, UserHome home, ICapacitorHttpClient http) {
+    readonly WatcherManager  _watchers = new(config, profiles, http);
+    readonly AgentHookPoster _poster   = new(config, profiles, http);
 
     string Url => profiles.Resolution.ServerUrl!;
 
@@ -235,11 +237,10 @@ sealed class OpenCodeHookCommand(ConfigRoot config, ProfileContext profiles, Hoo
     /// for OpenCode is wherever the plugin's shell-out inherited, and would inject an unrelated
     /// repository's memories.</para>
     ///
-    /// <para><c>CanAttempt</c> is checked BEFORE any client is constructed, because the client factory's
-    /// <c>EnsureAbsolute</c> calls <c>Environment.Exit(2)</c> on an unusable base url — which would kill
-    /// the hook before it writes its output, and this hook's stdout is a data channel.</para>
+    /// <para>The URL is checked BEFORE any client is constructed, so an unusable base url spends no
+    /// lease and starts no task.</para>
     /// </summary>
-    internal Task<string?> StartMemoryIndexTask(
+    internal async Task<string?> StartMemoryIndexTask(
             string     sessionId,
             string?    scopeRoot,
             bool       disabled,
@@ -248,22 +249,19 @@ sealed class OpenCodeHookCommand(ConfigRoot config, ProfileContext profiles, Hoo
         // Both lanes off ⇒ nothing to fetch. A single disabled lane still runs the other.
         if ((disabled && guidelinesDisabled) || string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(scopeRoot)
          || budget <= TimeSpan.Zero
-         || !SessionStartMemoryHookSupport.CanAttempt(Url))
-            return Task.FromResult<string?>(null);
+         || !HookHttp.IsPostable(Url))
+            return null;
 
         try {
             var store    = SessionStartMemoryLeaseStore.Create(config, clock.Time);
-            var provider = SessionStartMemoryHookSupport.CompositeProvider(
-                config,
-                SessionStartMemoryHookSupport.ClientFactory(config, profiles, Url),
-                disposeClients: true);
+            var provider = SessionStartMemoryHookSupport.CompositeProvider(config, http.ForBackgroundAsync);
 
-            return new SessionStartMemoryOrchestrator(store, provider).GetFragmentAsync(
+            return await new SessionStartMemoryOrchestrator(store, provider).GetFragmentAsync(
                 LifecycleFor(sessionId),
                 new SessionStartMemoryContextRequest(Url, scopeRoot, disabled, budget, CancellationToken.None,
                     GuidelinesDisabled: guidelinesDisabled));
         } catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException) {
-            return Task.FromResult<string?>(null);
+            return null;
         }
     }
 

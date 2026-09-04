@@ -1,4 +1,6 @@
 using Capacitor.Cli.Core;
+using Capacitor.Cli.Core.Auth;
+using Capacitor.Cli.Core.Http;
 using Capacitor.Cli.Daemon.Pty;
 using Capacitor.Cli.Daemon.Services;
 using Microsoft.Extensions.Hosting;
@@ -61,6 +63,8 @@ internal static class AgentOrchestratorHarness {
         var worktreeManager  = new WorktreeManager(config, NullLogger<WorktreeManager>.Instance);
         var repoMatcher      = new RepoMatcher(config, NullLogger<RepoMatcher>.Instance);
         var httpFactory      = new StubHttpClientFactory();
+        var http             = new FixedCapacitorHttpClient();
+        var tokens           = AuthFixtures.NewTokenStore(configRoot.Root);
         var permissionBridge = new LocalPermissionBridge(server, NullLogger<LocalPermissionBridge>.Instance);
 
         // Mirror DaemonRunner's DI wiring: one PtyHostedAgentRuntimeFactory per registered launcher,
@@ -88,6 +92,8 @@ internal static class AgentOrchestratorHarness {
             repoMatcher,
             ptyFactory,
             httpFactory,
+            http,
+            tokens,
             permissionBridge,
             launchers,
             runtimeFactories,
@@ -117,6 +123,8 @@ internal static class AgentOrchestratorHarness {
                 RepoMatcher                                             repoMatcher,
                 IPtyProcessFactory                                      ptyFactory,
                 IHttpClientFactory                                      httpClientFactory,
+                ICapacitorHttpClient                                    http,
+                TokenStore                                              tokens,
                 LocalPermissionBridge                                   permissionBridge,
                 IReadOnlyDictionary<string, IHostedAgentLauncher>       launchers,
                 IReadOnlyDictionary<string, IHostedAgentRuntimeFactory> runtimeFactories,
@@ -133,6 +141,8 @@ internal static class AgentOrchestratorHarness {
             repoMatcher,
             ptyFactory,
             httpClientFactory,
+            http,
+            tokens,
             permissionBridge,
             launchers,
             runtimeFactories,

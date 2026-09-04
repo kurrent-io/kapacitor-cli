@@ -41,7 +41,7 @@ record TranscriptBatch {
     public bool Strict { get; init; }
 }
 
-record ErrorEntry(
+public record ErrorEntry(
         string         SessionId,
         string?        SessionSlug,
         string?        AgentId,
@@ -51,7 +51,7 @@ record ErrorEntry(
         DateTimeOffset Timestamp
     );
 
-record RecapEntry(
+public record RecapEntry(
         string         Type,
         string?        SessionId,
         string?        AgentId,
@@ -288,7 +288,7 @@ record WhatsDonePayload {
     public long CacheWriteTokens { get; init; }
 }
 
-record RepoRecapEntry(
+public record RepoRecapEntry(
         string          SessionId,
         string?         Slug,
         string?         Title,

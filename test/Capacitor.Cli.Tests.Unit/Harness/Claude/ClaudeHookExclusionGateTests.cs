@@ -20,7 +20,7 @@ public class ClaudeHookExclusionGateTests {
     // Instance, not static: the hook writes under the config dir (the repo-detection cache,
     // the lease store), so it must be handed this test's own root — which a static helper
     // cannot see, TUnit injecting it after construction.
-    ClaudeHookCommand Hook() => new(Config.Root, Resolutions.None(Config.Root), _clock, Home);
+    ClaudeHookCommand Hook() => new(Config.Root, Resolutions.None(Config.Root), _clock, Home, new FixedCapacitorHttpClient());
 
     // The gate reads the budget only for the repo probe, which these path-exclusion payloads never
     // reach; what they vary is the profile, not the clock. Any live ceiling will do.

@@ -127,6 +127,45 @@ public class RepoScopedCommandContractTests : IDisposable {
 
     // --- kcap skills sync ---
 
+    /// <summary>The snapshot request carries the vendor and the host platform as query parameters,
+    /// and the stored etag as a quoted <c>If-None-Match</c> — which is what lets the server answer
+    /// 304 and the command report the manifest it already has.</summary>
+    [Test]
+    public async Task Skills_sync_sends_the_stored_etag_with_the_snapshot_request() {
+        SeedOwnedManifest("claude", etag: "abc123");
+
+        // 304 only for the conditional request: an unconditional one is a target that has never
+        // synced, and answering it "unchanged" would be the server contradicting itself.
+        _server.Given(
+                Request.Create().WithPath($"/api/repositories/{RepoHash}/skills")
+                    .WithHeader("If-None-Match", "*").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(304));
+        StubEmptySnapshot();
+
+        var run = await RunAsync("skills", "sync", "--dry-run");
+
+        await Assert.That(run.ExitCode).IsEqualTo(0);
+        await Assert.That(run.Stdout).Contains("[claude] skills up to date");
+
+        var get = SnapshotRequestFor("claude");
+        await Assert.That(get.RequestMessage.RawQuery).StartsWith("?vendor=claude");
+        await Assert.That(Header(get, "If-None-Match")).IsEqualTo("\"abc123\"");
+        await Assert.That(Header(get, "Authorization")).IsEqualTo($"Bearer {BearerToken}");
+    }
+
+    /// <summary>A target with no stored etag asks unconditionally, so the server cannot answer 304
+    /// over a manifest that has never been written.</summary>
+    [Test]
+    public async Task Skills_sync_omits_the_etag_when_none_is_stored() {
+        SeedOwnedManifest("claude", etag: null);
+        StubEmptySnapshot();
+
+        var run = await RunAsync("skills", "sync", "--dry-run");
+
+        await Assert.That(run.ExitCode).IsEqualTo(0);
+        await Assert.That(Header(SnapshotRequestFor("claude"), "If-None-Match")).IsNull();
+    }
+
     /// <summary>A 404 names the profile, the same answer curate gives for the same reason.</summary>
     [Test]
     public async Task Skills_sync_reports_a_repo_it_cannot_see() {
@@ -147,6 +186,19 @@ public class RepoScopedCommandContractTests : IDisposable {
         Config.CreateDir("skills", RepoHash, target).CreateFile(
             "manifest.json",
             etag is null ? """{"skills":[]}""" : $$"""{"etag":"{{etag}}","skills":[]}""");
+
+    void StubEmptySnapshot() =>
+        _server.Given(Request.Create().WithPath($"/api/repositories/{RepoHash}/skills").UsingGet())
+            .RespondWith(Json(200, """{"etag":"fresh","skills":[]}"""));
+
+    /// <summary>The vendored request, picked out by its query: a target is also reconciled when its
+    /// harness is merely installed, so which OTHER targets sync is a property of the machine and
+    /// nothing here may assert on the total.</summary>
+    ILogEntry SnapshotRequestFor(string vendor) =>
+        _server.FindLogEntries(
+                Request.Create().WithPath($"/api/repositories/{RepoHash}/skills")
+                    .WithParam("vendor", vendor).UsingGet())
+            .Single();
 
     // --- fixtures ---
 

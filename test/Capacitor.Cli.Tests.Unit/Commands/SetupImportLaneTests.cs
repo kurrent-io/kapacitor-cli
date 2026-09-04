@@ -104,7 +104,8 @@ public class SetupImportLaneTests {
             0);
 
     SetupImportLane Lane(Func<SetupImportLane.Pass, Task<ImportCommand.ImportRunOutcome?>> runner) =>
-        new(Config.Root, Resolutions.None(Config.Root), Home, HarnessPaths.FromEnvironment(Home), runner);
+        new(Config.Root, Resolutions.None(Config.Root), Home, new FixedCapacitorHttpClient(),
+            HarnessPaths.FromEnvironment(Home), runner);
 
     /// <summary>A run that reported its Done grid with nothing failed.</summary>
     static Task<ImportCommand.ImportRunOutcome?> Clean() =>
@@ -249,7 +250,8 @@ public class SetupImportLaneTests {
         async Task<int?> ThirtyDayCountAsOf(DateTimeOffset asOf) {
             ImportCommand.ImportDiscoveryResult? found = null;
 
-            await new ImportCommand(Config.Root, Resolutions.None(Config.Root), Home).HandleImport(
+            await new ImportCommand(Config.Root, Resolutions.None(Config.Root), Home,
+                new FixedCapacitorHttpClient()).HandleImport(
                 filterCwd:    null,
                 minLines:     1,
                 sources:      [new ClaudeImportSource(Config.Root, projects)],

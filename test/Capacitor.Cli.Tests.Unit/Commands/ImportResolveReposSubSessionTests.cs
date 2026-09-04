@@ -48,7 +48,8 @@ public class ImportResolveReposSubSessionTests {
 
         var sessionCwds = new Dictionary<string, string>(StringComparer.Ordinal);
 
-        await new ImportCommand(Config.Root, Resolutions.None(Config.Root), Home).ResolveTranscriptReposAsync(
+        await new ImportCommand(Config.Root, Resolutions.None(Config.Root), Home, new FixedCapacitorHttpClient())
+            .ResolveTranscriptReposAsync(
             transcripts,
             codex: false,
             new ImportCommand.ImportDisplay { Tty = false },

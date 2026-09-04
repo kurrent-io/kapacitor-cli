@@ -4,6 +4,8 @@ using Capacitor.Cli.Core.Config;
 using Capacitor.Cli.SessionStartMemory;
 using Capacitor.Cli.Core.Harness;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands.Harness;
 
 /// <summary>
@@ -33,9 +35,9 @@ namespace Capacitor.Cli.Commands.Harness;
 /// dashed id lives on only in the transcript file path). Historical import canonicalizes the
 /// same way, so a conversation captured live and later re-imported dedupes to one stream.
 /// </summary>
-sealed class AntigravityHookCommand(ConfigRoot config, ProfileContext profiles, HookClock clock, UserHome home) {
-    readonly WatcherManager  _watchers = new(config, profiles);
-    readonly AgentHookPoster _poster   = new(config, profiles);
+sealed class AntigravityHookCommand(ConfigRoot config, ProfileContext profiles, HookClock clock, UserHome home, ICapacitorHttpClient http) {
+    readonly WatcherManager  _watchers = new(config, profiles, http);
+    readonly AgentHookPoster _poster   = new(config, profiles, http);
 
     string Url => profiles.Resolution.ServerUrl!;
 
@@ -284,11 +286,10 @@ sealed class AntigravityHookCommand(ConfigRoot config, ProfileContext profiles, 
     /// is skipped rather than letting the shared resolver fall back to the hook PROCESS's cwd and
     /// inject an unrelated repository's memories.</para>
     ///
-    /// <para><c>CanAttempt</c> is checked BEFORE any client is constructed, because the client
-    /// factory's EnsureAbsolute calls Environment.Exit(2) on an unusable base url — which would kill
-    /// the hook before it can write its output.</para>
+    /// <para>The URL is checked BEFORE any client is constructed, so an unusable base url spends no
+    /// lease and starts no task.</para>
     /// </summary>
-    internal Task<string?> StartMemoryIndexTask(
+    internal async Task<string?> StartMemoryIndexTask(
             string     sessionId,
             string?    scopeRoot,
             bool       disabled,
@@ -296,22 +297,19 @@ sealed class AntigravityHookCommand(ConfigRoot config, ProfileContext profiles, 
             TimeSpan   budget) {
         if ((disabled && guidelinesDisabled) || string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(scopeRoot)
          || budget <= TimeSpan.Zero
-         || !SessionStartMemoryHookSupport.CanAttempt(Url))
-            return Task.FromResult<string?>(null);
+         || !HookHttp.IsPostable(Url))
+            return null;
 
         try {
             var store    = SessionStartMemoryLeaseStore.Create(config, clock.Time);
-            var provider = SessionStartMemoryHookSupport.CompositeProvider(
-                config,
-                SessionStartMemoryHookSupport.ClientFactory(config, profiles, Url),
-                disposeClients: true);
+            var provider = SessionStartMemoryHookSupport.CompositeProvider(config, http.ForBackgroundAsync);
 
-            return new SessionStartMemoryOrchestrator(store, provider).GetFragmentAsync(
+            return await new SessionStartMemoryOrchestrator(store, provider).GetFragmentAsync(
                 LifecycleFor(sessionId),
                 new SessionStartMemoryContextRequest(Url, scopeRoot, disabled, budget, CancellationToken.None,
                     GuidelinesDisabled: guidelinesDisabled));
         } catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException) {
-            return Task.FromResult<string?>(null);
+            return null;
         }
     }
 

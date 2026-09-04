@@ -165,7 +165,7 @@ public class AntigravitySkippedChildOverrideRoutedLoopTests : IDisposable {
 
         var exitCode = 0;
         var stdout = await CaptureStdoutAsync(async () => {
-            exitCode = await new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home).HandleImport(
+            exitCode = await new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home, new FixedCapacitorHttpClient()).HandleImport(
                 filterCwd: null,
                 minLines: 0,
                 sources: [antigravity, gemini],

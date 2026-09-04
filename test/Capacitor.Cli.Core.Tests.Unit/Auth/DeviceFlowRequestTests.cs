@@ -35,10 +35,10 @@ public class DeviceFlowRequestTests {
     [Test]
     public async Task The_device_code_request_asks_for_json_and_carries_the_org_scope() {
         using var capture = new Capturing();
-        using var http    = new HttpClient(capture);
 
         var token = await OAuthLoginFlow.RunDeviceFlowAsync(
-            http, "Iv1.abc", new RecordingBrowser(), progress: new RecordingAuthProgress());
+            new GitHubOAuthClient(new PlainHttpClientFactory(capture)), "Iv1.abc", new RecordingBrowser(),
+            progress: new RecordingAuthProgress());
 
         await Assert.That(token).IsEqualTo("tok");
         await Assert.That(capture.Accept).Contains("application/json");

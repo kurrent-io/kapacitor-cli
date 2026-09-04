@@ -1,6 +1,5 @@
 using System.Text.Json.Nodes;
 using Capacitor.Cli.Commands;
-using Capacitor.Cli.Core;
 using Capacitor.Cli.Tests.Unit.Policy;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
@@ -15,8 +14,7 @@ namespace Capacitor.Cli.Tests.Unit.Commands;
 /// session's prompt still goes to the bridge that owns it.
 /// </summary>
 /// <remarks>Bare <c>[NotInParallel]</c>: <c>KCAP_RENDERED_AGENT</c> and <c>KCAP_DAEMON_URL</c> steer
-/// the branch under test and are read outside any enumerable cohort, and the auth provider cache is
-/// process-global.</remarks>
+/// the branch under test and are read outside any enumerable cohort.</remarks>
 [NotInParallel]
 public class PermissionRequestPolicySeamTests : IDisposable {
     [TempDir] public required TempDir Tmp { get; init; }
@@ -26,16 +24,10 @@ public class PermissionRequestPolicySeamTests : IDisposable {
 
     const string Sid = "3f1c9a2b4d5e4f6a8b7c0d1e2f3a4b5c";
 
-    [Before(Test)]
-    public void Reset() => HttpClientExtensions.ResetProviderCacheForTesting();
-
-    public void Dispose() {
-        _server.Stop();
-        HttpClientExtensions.ResetProviderCacheForTesting();
-    }
+    public void Dispose() => _server.Stop();
 
     PermissionRequestCommand Command() =>
-        new(Config.Root, Resolutions.At(_server.Urls[0], Config.Root));
+        new(Config.Root, Resolutions.At(_server.Urls[0], Config.Root), new RecordingCapacitorHttpClient());
 
     // No transcript_path: the watcher self-heal is a no-op, so selfHealWatcher carries only the
     // governance meaning this class is about.

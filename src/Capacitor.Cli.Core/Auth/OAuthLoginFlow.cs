@@ -102,20 +102,12 @@ public static class OAuthLoginFlow {
     /// </summary>
     /// <returns>The GitHub access token on success, or <c>null</c> on failure.</returns>
     internal static async Task<string?> RunDeviceFlowAsync(
-            HttpClient http, string clientId, IBrowserLauncher launcher,
+            GitHubOAuthClient github, string clientId, IBrowserLauncher launcher,
             CancellationToken ct = default, IAuthProgress? progress = null,
             TimeProvider? time = null) {
         progress ??= ConsoleAuthProgress.Instance;
 
-        var deviceResponse = await PostFormForJsonAsync(
-            http,
-            "https://github.com/login/device/code",
-            new() {
-                ["client_id"] = clientId,
-                ["scope"]     = "read:user read:org"
-            },
-            ct
-        );
+        var deviceResponse = await github.RequestDeviceCodeAsync(clientId, ct);
 
         if (!deviceResponse.IsSuccessStatusCode) {
             progress.Error($"Error requesting device code: {await deviceResponse.Content.ReadAsStringAsync(ct)}");
@@ -154,7 +146,7 @@ public static class OAuthLoginFlow {
         progress.DeviceCode(device.UserCode + (copied ? "  (copied to clipboard)" : ""), shownUri, "GitHub", prefilled);
 
         return await PollDeviceGrantAsync(
-            http, "https://github.com/login/oauth/access_token",
+            github.PollForTokenAsync,
             new() { ["client_id"] = clientId, ["device_code"] = device.DeviceCode },
             CapacitorJsonContext.Default.GitHubTokenResponse,
             r => (r.AccessToken, r.Error),
@@ -170,7 +162,8 @@ public static class OAuthLoginFlow {
     /// code the server had already discarded.
     /// </param>
     internal static async Task<T?> PollDeviceGrantAsync<T, TResponse>(
-            HttpClient http, string tokenUrl, Dictionary<string, string> form,
+            Func<Dictionary<string, string>, CancellationToken, Task<HttpResponseMessage>> post,
+            Dictionary<string, string> form,
             System.Text.Json.Serialization.Metadata.JsonTypeInfo<TResponse> typeInfo,
             Func<TResponse, (T? Value, string? Error)> read,
             DeviceCodeResponse device, int interval,
@@ -203,7 +196,7 @@ public static class OAuthLoginFlow {
             HttpResponseMessage response;
 
             try {
-                response = await PostFormForJsonAsync(http, tokenUrl, form, attempt.Token);
+                response = await post(form, attempt.Token);
             } catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException && !ct.IsCancellationRequested) {
                 // A blip mid-poll is not a failed sign-in - the human is still at the browser, and the
                 // deadline above is what ends this loop.
@@ -288,16 +281,6 @@ public static class OAuthLoginFlow {
         }
     }
 
-    // Accept rides on the request, not the client: an injected HttpClient (the façade's) would
-    // otherwise get GitHub's form-encoded default and fail to parse.
-    static async Task<HttpResponseMessage> PostFormForJsonAsync(
-            HttpClient http, string url, Dictionary<string, string> form, CancellationToken ct) {
-        using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = new FormUrlEncodedContent(form) };
-        request.Headers.Accept.Add(new("application/json"));
-
-        return await http.SendAsync(request, ct);
-    }
-
     /// <summary>
     /// GitHub authorization-code-with-PKCE via OidcClient's front-channel (authorize URL + PKCE +
     /// state) over a 127.0.0.1 loopback, then the proxy-mediated JSON code-exchange to the Capacitor
@@ -307,7 +290,7 @@ public static class OAuthLoginFlow {
     /// thrown out of <see cref="LoopbackBrowser"/>). <paramref name="browser"/> is the test seam.
     /// </summary>
     public static async Task<string?> RunGitHubBrowserFlowAsync(
-            string clientId, string codeExchangeUrl, IBrowserLauncher launcher,
+            GitHubOAuthClient github, string clientId, string codeExchangeUrl, IBrowserLauncher launcher,
             IBrowser? browser = null, TimeSpan? timeout = null,
             CancellationToken ct = default, IAuthProgress? progress = null) {
         progress ??= ConsoleAuthProgress.Instance;
@@ -376,17 +359,13 @@ public static class OAuthLoginFlow {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeout ?? TimeSpan.FromMinutes(5));
 
-        using var http = new HttpClient();
-        http.DefaultRequestHeaders.Accept.Add(new("application/json"));
-
         HttpResponseMessage tokenResponse;
 
         try {
-            tokenResponse = await http.PostAsJsonAsync(
+            tokenResponse = await github.ExchangeCodeAsync(
                 codeExchangeUrl,
                 new GitHubCodeExchangeRequest { Code = resp.Code, CodeVerifier = state.CodeVerifier, RedirectUri = redirectUri },
-                CapacitorJsonContext.Default.GitHubCodeExchangeRequest,
-                cancellationToken: cts.Token
+                cts.Token
             );
         } catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or UriFormatException or InvalidOperationException) {
             ct.ThrowIfCancellationRequested(); // the caller's cancel aborted the exchange — not a connectivity failure
@@ -522,17 +501,7 @@ public static class OAuthLoginFlow {
     }
 
     internal static async Task<string?> AcquireGitHubTokenAsync(
-            string clientId, string? codeExchangeUrl, bool forceDevice, IBrowserLauncher launcher,
-            CancellationToken ct = default, IAuthProgress? progress = null) {
-        using var http = new HttpClient();
-
-        return await AcquireGitHubTokenAsync(http, clientId, codeExchangeUrl, forceDevice, launcher, ct, progress);
-    }
-
-    // HttpClient-injectable core: the device-flow leg runs on the caller's client so the façade's
-    // one client (and a test's scripted handler) covers it.
-    internal static async Task<string?> AcquireGitHubTokenAsync(
-            HttpClient http, string clientId, string? codeExchangeUrl, bool forceDevice,
+            GitHubOAuthClient github, string clientId, string? codeExchangeUrl, bool forceDevice,
             IBrowserLauncher launcher,
             CancellationToken ct = default, IAuthProgress? progress = null) {
         progress ??= ConsoleAuthProgress.Instance;
@@ -542,7 +511,8 @@ public static class OAuthLoginFlow {
 
         if (choice == GitHubFlow.Browser) {
             try {
-                var token = await RunGitHubBrowserFlowAsync(clientId, codeExchangeUrl!, launcher, ct: ct, progress: progress);
+                var token = await RunGitHubBrowserFlowAsync(
+                    github, clientId, codeExchangeUrl!, launcher, ct: ct, progress: progress);
 
                 return token ??
                     // Browser flow ran but user cancelled / state mismatch — don't silently fall back.
@@ -556,7 +526,7 @@ public static class OAuthLoginFlow {
             }
         }
 
-        return await RunDeviceFlowAsync(http, clientId, launcher, ct, progress);
+        return await RunDeviceFlowAsync(github, clientId, launcher, ct, progress);
     }
 
     internal const string WorkOSApiBase = "https://api.workos.com";
@@ -636,13 +606,11 @@ public static class OAuthLoginFlow {
     /// Public client: no secret anywhere in this flow, so the proxy is not involved.
     /// </summary>
     internal static async Task<WorkOSAuthResponse?> RunWorkOSDeviceFlowAsync(
-            HttpClient http, string clientId, IBrowserLauncher launcher,
-            CancellationToken ct = default,
-            IAuthProgress? progress = null, string apiBase = WorkOSApiBase, TimeProvider? time = null) {
+            WorkOSClient workos, string clientId, IBrowserLauncher launcher,
+            CancellationToken ct = default, IAuthProgress? progress = null, TimeProvider? time = null) {
         progress ??= ConsoleAuthProgress.Instance;
 
-        var authorize = await PostFormForJsonAsync(
-            http, $"{apiBase}/user_management/authorize/device", new() { ["client_id"] = clientId }, ct);
+        var authorize = await workos.AuthorizeDeviceAsync(clientId, ct);
 
         if (!authorize.IsSuccessStatusCode) {
             // Step 1 failing is the rollout hazard, not a user error: if CLI Auth is not enabled on this
@@ -694,7 +662,7 @@ public static class OAuthLoginFlow {
             prefilled: browserOpened && !string.IsNullOrEmpty(device.VerificationUriComplete));
 
         var token = await PollDeviceGrantAsync(
-            http, $"{apiBase}/user_management/authenticate",
+            workos.PollForTokenAsync,
             new() { ["client_id"] = clientId, ["device_code"] = device.DeviceCode },
             CapacitorJsonContext.Default.WorkOSAuthResponse,
             r => (string.IsNullOrEmpty(r.AccessToken) ? null : r, r.Error),
@@ -712,10 +680,10 @@ public static class OAuthLoginFlow {
     /// device grant reachable by pressing <c>d</c> at any point and taken automatically when loopback
     /// cannot bind. A loopback attempt that RAN and failed returns <c>null</c> rather than falling
     /// through — a cancel or a state mismatch is an answer, and silently re-asking through another
-    /// channel would ignore it. Mirrors <see cref="AcquireGitHubTokenAsync(HttpClient,string,string?,bool,IBrowserLauncher,CancellationToken,IAuthProgress?)"/>.
+    /// channel would ignore it. Mirrors <see cref="AcquireGitHubTokenAsync(GitHubOAuthClient,string,string?,bool,IBrowserLauncher,CancellationToken,IAuthProgress?)"/>.
     /// </summary>
     internal static async Task<WorkOSAuthResponse?> AcquireWorkOSAsync(
-            HttpClient http, string clientId, string? organizationId, bool forceDevice,
+            WorkOSClient workos, string clientId, string? organizationId, bool forceDevice,
             IBrowserLauncher launcher,
             IBrowser? browser = null, string apiBase = WorkOSApiBase, CancellationToken ct = default,
             IAuthProgress? progress = null, IKeyWatcher? keys = null, TimeProvider? time = null) {
@@ -723,7 +691,7 @@ public static class OAuthLoginFlow {
         keys     ??= ConsoleKeyWatcher.Instance;
 
         if (ChooseWorkOSFlow(forceDevice) is WorkOSFlow.Device) {
-            return await RunWorkOSDeviceFlowAsync(http, clientId, launcher, ct, progress, apiBase, time);
+            return await RunWorkOSDeviceFlowAsync(workos, clientId, launcher, ct, progress, time);
         }
 
         using var escape = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -771,7 +739,7 @@ public static class OAuthLoginFlow {
             await watch;
         }
 
-        return await RunWorkOSDeviceFlowAsync(http, clientId, launcher, ct, progress, apiBase, time);
+        return await RunWorkOSDeviceFlowAsync(workos, clientId, launcher, ct, progress, time);
     }
 
     /// <summary>
@@ -824,13 +792,13 @@ public static class OAuthLoginFlow {
     /// server-bound tokens WITHOUT saving them. <c>null</c> means the reason is already reported.
     /// </summary>
     internal static async Task<(StoredTokens Tokens, string Username)?> WorkOSTokensForServerAsync(
-            HttpClient http, string serverUrl, string clientId, string? organizationId, bool forceDevice,
+            WorkOSClient workos, string serverUrl, string clientId, string? organizationId, bool forceDevice,
             IBrowserLauncher launcher,
             IBrowser? browser, CancellationToken ct, IAuthProgress progress, string apiBase = WorkOSApiBase,
             IKeyWatcher? keys = null, TimeProvider? time = null) {
         // AcquireWorkOSAsync already reported the specific failure reason.
         var json = await AcquireWorkOSAsync(
-            http, clientId, organizationId, forceDevice, launcher, browser, apiBase, ct, progress, keys, time);
+            workos, clientId, organizationId, forceDevice, launcher, browser, apiBase, ct, progress, keys, time);
         if (json is null) return null;
 
         // Org gate: a multi-org user must not be "logged in" to the wrong org — every API call would
@@ -842,7 +810,7 @@ public static class OAuthLoginFlow {
             // the human picks at the AuthKit screen and the CLI cannot constrain it — telling them to
             // re-run would send them back to the same unconstrained screen. The switch is gated on
             // their own membership, so a user with no claim to the org still lands on the error below.
-            json = await CorrectWorkOSOrgAsync(http, apiBase, clientId, json, organizationId, ct);
+            json = await CorrectWorkOSOrgAsync(workos, clientId, json, organizationId, ct);
 
             if (json is null) {
                 progress.Error("Error: Signed in to the wrong workspace. Sign in again and choose the one this server belongs to.");
@@ -886,11 +854,11 @@ public static class OAuthLoginFlow {
     /// server rejects on every call.
     /// </summary>
     internal static async Task<WorkOSAuthResponse?> CorrectWorkOSOrgAsync(
-            HttpClient http, string apiBase, string clientId, WorkOSAuthResponse signedIn,
+            WorkOSClient workos, string clientId, WorkOSAuthResponse signedIn,
             string organizationId, CancellationToken ct) {
         if (string.IsNullOrEmpty(signedIn.RefreshToken)) return null;
 
-        var switched = await SwitchWorkOSOrgAsync(http, apiBase, clientId, signedIn.RefreshToken, organizationId, ct);
+        var switched = await workos.SwitchOrganizationAsync(clientId, signedIn.RefreshToken, organizationId, ct);
 
         if (switched is null
          || string.IsNullOrEmpty(switched.AccessToken)
@@ -901,54 +869,6 @@ public static class OAuthLoginFlow {
         // The refresh_token grant answers without a user, so carry the sign-in's own across or the
         // display name collapses to "unknown".
         return switched.User is null ? switched with { User = signedIn.User } : switched;
-    }
-
-    /// <summary>
-    /// Public-client WorkOS org-switch: exchanges a refresh token for an org-scoped token. The spike
-    /// confirmed the resulting refresh token stays bound to the org, so subsequent refreshes need no
-    /// organization_id. No client secret.
-    /// </summary>
-    public static async Task<WorkOSAuthResponse?> SwitchWorkOSOrgAsync(
-            HttpClient http, string apiBase, string clientId, string refreshToken, string organizationId, CancellationToken ct = default) {
-        var resp = await http.PostAsync(
-            $"{apiBase.TrimEnd('/')}/user_management/authenticate",
-            new FormUrlEncodedContent(new Dictionary<string, string> {
-                ["grant_type"]      = "refresh_token",
-                ["client_id"]       = clientId,
-                ["refresh_token"]   = refreshToken,
-                ["organization_id"] = organizationId
-            }), ct);
-
-        if (!resp.IsSuccessStatusCode) return null;
-
-        return await resp.Content.ReadFromJsonAsync(CapacitorJsonContext.Default.WorkOSAuthResponse, ct);
-    }
-
-    /// <summary>
-    /// Public-client WorkOS token refresh (org-less): exchanges a refresh token for a fresh access
-    /// token without switching organization. Keeps the org-less token alive across the create-tenant
-    /// provisioning poll, which can outlive WorkOS's ~5-minute access-token TTL. No client secret.
-    /// </summary>
-    public static async Task<WorkOSAuthResponse?> RefreshWorkOSTokenAsync(
-            HttpClient http, string apiBase, string clientId, string refreshToken, CancellationToken ct = default) {
-        // Degrade transport/timeout/parse failures to null (mirrors TenantProvisioningClient): this
-        // fires automatically and repeatedly during the provisioning poll, so a blip must not throw
-        // and abort the flow — the token source keeps the current token and retries next tick.
-        try {
-            var resp = await http.PostAsync(
-                $"{apiBase.TrimEnd('/')}/user_management/authenticate",
-                new FormUrlEncodedContent(new Dictionary<string, string> {
-                    ["grant_type"]    = "refresh_token",
-                    ["client_id"]     = clientId,
-                    ["refresh_token"] = refreshToken
-                }), ct);
-
-            if (!resp.IsSuccessStatusCode) return null;
-
-            return await resp.Content.ReadFromJsonAsync(CapacitorJsonContext.Default.WorkOSAuthResponse, ct);
-        } catch (Exception e) when (e is HttpRequestException or OperationCanceledException or JsonException or NotSupportedException) {
-            return null;
-        }
     }
 
     // The server-supplied code-exchange URL must be a fully-qualified http(s) URI before

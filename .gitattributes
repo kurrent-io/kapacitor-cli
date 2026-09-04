@@ -3,3 +3,9 @@
 # Pin them to LF so a Windows checkout (core.autocrlf) can't smuggle CRLF into
 # the embedded copy and break those comparisons. See AI-820.
 src/Capacitor.Cli.Core/Resources/*.txt text eol=lf
+
+# A raw NUL in the first 8k makes git call a source file binary and stop rendering
+# its diff, so review sees "Binary files differ" and nothing else. Only the bare
+# `diff` attribute forces text: giving it a value (diff=csharp) selects a driver
+# instead and the file goes binary again.
+*.cs diff

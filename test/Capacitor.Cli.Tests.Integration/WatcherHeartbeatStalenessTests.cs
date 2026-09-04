@@ -28,7 +28,7 @@ public class WatcherHeartbeatStalenessTests {
 
     // One manager over that root and the URL these spawns target — the two values production hands
     // it, so a watcher here can never point at a second server.
-    static readonly WatcherManager Watchers = new(Root, Resolutions.At("http://localhost:0", Root));
+    static readonly WatcherManager Watchers = new(Root, Resolutions.At("http://localhost:0", Root), new FixedCapacitorHttpClient());
 
     static string? _previousWatcherDir;
 

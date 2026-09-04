@@ -4,9 +4,11 @@ using Capacitor.Cli.Core.Telemetry;
 using Capacitor.Cli.Core;
 using ProfileConfigJsonContextIndented = Capacitor.Cli.Core.Config.ProfileConfigJsonContextIndented;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands;
 
-public sealed class ConfigCommand(ConfigRoot config) {
+public sealed class ConfigCommand(ConfigRoot config, ICapacitorHttpClient http) {
     public async Task<int> HandleAsync(string[] args) {
         if (args.Length < 2) {
             await Console.Error.WriteLineAsync("Usage: kcap config <show|set|unset> [key] [value]");
@@ -56,7 +58,7 @@ public sealed class ConfigCommand(ConfigRoot config) {
 
         if (key == "server_url") {
             var result = await ServerUrlNormalizer.NormalizeAsync(
-                value, skipProbe, CancellationToken.None);
+                value, skipProbe, CancellationToken.None, ServerUrlNormalizer.ProbeWith(http));
 
             if (result.Warning is not null)
                 await Console.Error.WriteLineAsync($"Warning: {result.Warning}");

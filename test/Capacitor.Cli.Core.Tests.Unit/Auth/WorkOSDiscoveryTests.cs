@@ -45,12 +45,12 @@ public class WorkOSDiscoveryTests {
         await Assert.That(flow).IsTypeOf<WorkOSDiscoveryFlow.Ready>();
 
         var result = await WorkOSDiscovery.PublishAsync(
-            Config.Root,
+            Config.Root, AuthFixtures.NewTokenStore(Config.Root),
             (WorkOSDiscoveryFlow.Ready)flow, new RecordingAuthProgress(), beforeCommit: null, CancellationToken.None);
 
         await Assert.That(result).IsTypeOf<AuthResult.Committed>();
 
-        var stored = await new TokenStore(Config.Root).LoadAsync("eventuous");
+        var stored = await AuthFixtures.NewTokenStore(Config.Root).LoadAsync("eventuous");
         await Assert.That(stored).IsNotNull();
         await Assert.That(stored!.AccessToken).IsEqualTo("acc2");
         await Assert.That(stored.Provider).IsEqualTo(AuthProvider.WorkOS);
@@ -131,12 +131,12 @@ public class WorkOSDiscoveryTests {
         await Assert.That(flow).IsTypeOf<WorkOSDiscoveryFlow.Ready>();
 
         var result = await WorkOSDiscovery.PublishAsync(
-            Config.Root,
+            Config.Root, AuthFixtures.NewTokenStore(Config.Root),
             (WorkOSDiscoveryFlow.Ready)flow, new RecordingAuthProgress(), beforeCommit: null, CancellationToken.None);
 
         await Assert.That(result).IsTypeOf<AuthResult.Committed>();
 
-        var stored = await new TokenStore(Config.Root).LoadAsync("acme");
+        var stored = await AuthFixtures.NewTokenStore(Config.Root).LoadAsync("acme");
         await Assert.That(stored).IsNotNull();
         await Assert.That(stored!.AccessToken).IsEqualTo("acc2");
 
@@ -207,7 +207,7 @@ public class WorkOSDiscoveryTests {
 
         // Nothing WorkOS-shaped happened: no org-switch, no profile, no token.
         await Assert.That(switchCalled).IsFalse();
-        await Assert.That(await new TokenStore(Config.Root).LoadAsync("kurrent")).IsNull();
+        await Assert.That(await AuthFixtures.NewTokenStore(Config.Root).LoadAsync("kurrent")).IsNull();
     }
 
     [Test]

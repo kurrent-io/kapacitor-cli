@@ -1,4 +1,5 @@
 using Capacitor.Cli.Core.Auth;
+using Capacitor.Cli.Core.Commands;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
 using WireMock.Server;
@@ -198,5 +199,107 @@ public class AuthProxyClientTests {
         var result = await client.DiscoverWorkOSTenantsAsync(server.Urls[0], "bad");
 
         await Assert.That(result.Error).IsEqualTo(DiscoveryError.TokenRejected);
+    }
+
+    [Test]
+    public async Task CreateMachineApplicationAsync_carries_the_operators_own_bearer() {
+        using var server = WireMockServer.Start();
+
+        server.Given(Request.Create().WithPath("/connect/m2m-applications").UsingPost())
+            .RespondWith(
+                Response.Create()
+                    .WithStatusCode(200)
+                    .WithBody("""{"application_id":"app_1","client_id":"cid","client_secret":"sec","organization_id":"org_1","created":true}""")
+                    .WithHeader("Content-Type", "application/json")
+            );
+
+        using var http   = new HttpClient();
+        var       client = new AuthProxyClient(http);
+
+        var result = await client.CreateMachineApplicationAsync(server.Urls[0], "wos-token", "runner");
+
+        await Assert.That(result.Error).IsEqualTo(MachineProvisioningError.None);
+        await Assert.That(result.Application!.ClientId).IsEqualTo("cid");
+        await Assert.That(result.Application.ClientSecret).IsEqualTo("sec");
+        await Assert.That(result.Application.Created).IsTrue();
+
+        var sent = server.LogEntries.Single().RequestMessage;
+
+        await Assert.That(sent.Headers!["Authorization"].Single()).IsEqualTo("Bearer wos-token");
+        await Assert.That(sent.Body).Contains("runner");
+    }
+
+    [Test]
+    public async Task CreateMachineApplicationAsync_separates_a_rejected_sign_in_from_a_missing_role() {
+        using var server = WireMockServer.Start();
+
+        server.Given(Request.Create().WithPath("/connect/m2m-applications").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(401));
+
+        using var http = new HttpClient();
+
+        var unauthorized = await new AuthProxyClient(http).CreateMachineApplicationAsync(server.Urls[0], "t", "runner");
+
+        server.Reset();
+        server.Given(Request.Create().WithPath("/connect/m2m-applications").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(403));
+
+        var forbidden = await new AuthProxyClient(http).CreateMachineApplicationAsync(server.Urls[0], "t", "runner");
+
+        await Assert.That(unauthorized.Error).IsEqualTo(MachineProvisioningError.Unauthorized);
+        await Assert.That(forbidden.Error).IsEqualTo(MachineProvisioningError.Forbidden)
+            .Because("one tells the operator to sign in again, the other that they need a role no sign-in will grant");
+    }
+
+    [Test]
+    public async Task CreateMachineApplicationAsync_reports_the_proxys_own_status_and_body() {
+        using var server = WireMockServer.Start();
+
+        server.Given(Request.Create().WithPath("/connect/m2m-applications").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(502).WithBody("upstream said no"));
+
+        using var http   = new HttpClient();
+        var       client = new AuthProxyClient(http);
+
+        var result = await client.CreateMachineApplicationAsync(server.Urls[0], "t", "runner");
+
+        await Assert.That(result.Error).IsEqualTo(MachineProvisioningError.Rejected);
+        await Assert.That(result.Status).IsEqualTo(502);
+        await Assert.That(result.Detail).IsEqualTo("upstream said no")
+            .Because("a bare \"provisioning failed\" leaves the operator nothing to act on");
+    }
+
+    [Test]
+    public async Task CreateMachineApplicationAsync_reports_an_unreachable_proxy() {
+        using var http   = new HttpClient();
+        var       client = new AuthProxyClient(http);
+
+        var result = await client.CreateMachineApplicationAsync("http://127.0.0.1:1", "t", "runner");
+
+        await Assert.That(result.Error).IsEqualTo(MachineProvisioningError.Unreachable);
+        await Assert.That(result.Detail).IsNotNull();
+    }
+
+    /// The command prints one message per outcome and has no wording for an exception; a success
+    /// whose body will not parse has to arrive as "no credential disclosed", not as a crash.
+    [Test]
+    public async Task CreateMachineApplicationAsync_degrades_an_unreadable_success_body() {
+        using var server = WireMockServer.Start();
+
+        server.Given(Request.Create().WithPath("/connect/m2m-applications").UsingPost())
+            .RespondWith(
+                Response.Create()
+                    .WithStatusCode(200)
+                    .WithBody("not json")
+                    .WithHeader("Content-Type", "application/json")
+            );
+
+        using var http   = new HttpClient();
+        var       client = new AuthProxyClient(http);
+
+        var result = await client.CreateMachineApplicationAsync(server.Urls[0], "t", "runner");
+
+        await Assert.That(result.Error).IsEqualTo(MachineProvisioningError.None);
+        await Assert.That(result.Application).IsNull();
     }
 }

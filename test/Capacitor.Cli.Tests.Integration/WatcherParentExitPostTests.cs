@@ -22,7 +22,7 @@ public class WatcherParentExitPostTests : IDisposable {
     // Instance, not static: the parent-exit POST resolves its client against a config dir, so it
     // must be this test's own root — which a static helper cannot see, TUnit injecting it after
     // construction.
-    WatchCommand Watch() => new(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home);
+    WatchCommand Watch() => new(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home, new FixedCapacitorHttpClient(), new FixedCredentialSource());
 
     public void Dispose() => _server.Stop();
 

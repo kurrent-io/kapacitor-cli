@@ -1,4 +1,6 @@
 using Capacitor.Cli.Commands;
+using Capacitor.Cli.Core.Http;
+using Microsoft.Extensions.DependencyInjection;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
 using WireMock.Server;
@@ -6,19 +8,28 @@ using WireMock.Server;
 namespace Capacitor.Cli.Tests.Integration;
 
 /// <summary>
-/// End-to-end verification that <c>UpdateCommand</c>'s channel-aware check
-/// queries the right npm dist-tag. Points <see cref="UpdateCommand.RegistryBaseUrl"/>
-/// at a WireMock-stubbed registry instead of the real <c>registry.npmjs.org</c>,
-/// mirroring the harness in <see cref="Config.ServerUrlProbeIntegrationTests"/>.
+/// End-to-end verification that <c>UpdateCommand</c>'s channel-aware check queries the right npm
+/// dist-tag. The registered client is re-pointed at a WireMock-stubbed registry instead of the real
+/// <c>registry.npmjs.org</c>, mirroring the harness in
+/// <see cref="Config.ServerUrlProbeIntegrationTests"/>.
 /// </summary>
 public class UpdateChannelQueryTests : IDisposable {
     [TempConfigRoot] public required TempConfigRoot Config { get; init; }
 
-    readonly WireMockServer _server         = WireMockServer.Start();
-    readonly string         _originalBaseUrl = UpdateCommand.RegistryBaseUrl;
+    readonly WireMockServer _server = WireMockServer.Start();
+
+    /// The registered client, not a hand-built one: the 5 s cap these tests reason about is set at
+    /// registration, so a client assembled here would not have it. AddHttpClient configuration is
+    /// additive, so aiming the base address at the stub keeps that cap.
+    readonly ServiceProvider _http;
+
+    NpmRegistryClient Npm => _http.GetRequiredService<NpmRegistryClient>();
 
     public UpdateChannelQueryTests() {
-        UpdateCommand.RegistryBaseUrl = _server.Url!;
+        _http = new ServiceCollection()
+            .AddCapacitorForeignClients()
+            .AddHttpClient<NpmRegistryClient>(c => c.BaseAddress = new Uri(_server.Url! + "/"))
+            .Services.BuildServiceProvider();
 
         _server.Given(Request.Create().WithPath("/@kurrent/kcap/latest").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(200).WithBody("""{"version":"0.8.0"}"""));
@@ -28,15 +39,13 @@ public class UpdateChannelQueryTests : IDisposable {
     }
 
     public void Dispose() {
-        UpdateCommand.RegistryBaseUrl = _originalBaseUrl;
+        _http.Dispose();
         _server.Stop();
     }
 
-    // UpdateCommand.RegistryBaseUrl is a shared static seam; serialize both
-    // tests in this class so they don't race each other's WireMock server.
-    [Test, NotInParallel("UpdateCommand_RegistryBaseUrl")]
+    [Test]
     public async Task Beta_channel_reports_beta_dist_tag_version() {
-        var result = await UpdateCommand.CheckForUpdateAsync(forceCheck: true, "beta", Config.Root);
+        var result = await UpdateCommand.CheckForUpdateAsync(forceCheck: true, "beta", Config.Root, Npm);
 
         await Assert.That(result.Latest).IsEqualTo("0.9.0-beta.1");
 
@@ -44,9 +53,9 @@ public class UpdateChannelQueryTests : IDisposable {
         await Assert.That(hits.Count).IsGreaterThanOrEqualTo(1);
     }
 
-    [Test, NotInParallel("UpdateCommand_RegistryBaseUrl")]
+    [Test]
     public async Task Latest_channel_reports_latest_dist_tag_version() {
-        var result = await UpdateCommand.CheckForUpdateAsync(forceCheck: true, "latest", Config.Root);
+        var result = await UpdateCommand.CheckForUpdateAsync(forceCheck: true, "latest", Config.Root, Npm);
 
         await Assert.That(result.Latest).IsEqualTo("0.8.0");
 
@@ -61,18 +70,18 @@ public class UpdateChannelQueryTests : IDisposable {
     /// inside the passive path's bound, so it completes; the second call
     /// must not touch the network at all.
     /// </summary>
-    [Test, NotInParallel("UpdateCommand_RegistryBaseUrl")]
+    [Test]
     public async Task Slow_but_completing_response_caches_and_second_run_skips_network() {
         const string channel = "test-slow-success";
         _server.Given(Request.Create().WithPath($"/@kurrent/kcap/{channel}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(200).WithBody("""{"version":"0.12.0"}""")
                 .WithDelay(TimeSpan.FromMilliseconds(400)));
 
-        var first = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root);
+        var first = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root, Npm);
         await Assert.That(first.Latest).IsEqualTo("0.12.0");
         await Assert.That(first.FromCache).IsFalse();
 
-        var second = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root);
+        var second = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root, Npm);
         await Assert.That(second.Latest).IsEqualTo("0.12.0");
         await Assert.That(second.FromCache).IsTrue();
 
@@ -98,7 +107,7 @@ public class UpdateChannelQueryTests : IDisposable {
     /// short-lived token is passed), whereas a cache/backoff hit returns
     /// near-instantly.
     /// </remarks>
-    [Test, NotInParallel("UpdateCommand_RegistryBaseUrl")]
+    [Test]
     public async Task Response_slower_than_passive_token_is_cancelled_and_backs_off() {
         const string channel = "test-passive-cancel";
         _server.Given(Request.Create().WithPath($"/@kurrent/kcap/{channel}").UsingGet())
@@ -107,7 +116,7 @@ public class UpdateChannelQueryTests : IDisposable {
 
         using var passiveBound = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
         var firstSw = System.Diagnostics.Stopwatch.StartNew();
-        var first = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root, passiveBound.Token);
+        var first = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root, Npm, passiveBound.Token);
         firstSw.Stop();
         await Assert.That(first.Latest).IsNull();
         await Assert.That(first.FromCache).IsTrue();
@@ -117,7 +126,7 @@ public class UpdateChannelQueryTests : IDisposable {
         await Assert.That(firstSw.Elapsed).IsLessThan(TimeSpan.FromSeconds(1));
 
         var secondSw = System.Diagnostics.Stopwatch.StartNew();
-        var second = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root);
+        var second = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root, Npm);
         secondSw.Stop();
         await Assert.That(second.Latest).IsNull();
         await Assert.That(second.FromCache).IsTrue();
@@ -133,13 +142,13 @@ public class UpdateChannelQueryTests : IDisposable {
     /// passive caller inside the window — the skip is driven by the cached
     /// record, not by the endpoint still being slow.
     /// </summary>
-    [Test, NotInParallel("UpdateCommand_RegistryBaseUrl")]
+    [Test]
     public async Task Failure_pins_one_hour_backoff_even_once_endpoint_recovers() {
         const string channel = "test-backoff-policy";
         _server.Given(Request.Create().WithPath($"/@kurrent/kcap/{channel}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(503));
 
-        var first = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root);
+        var first = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root, Npm);
         await Assert.That(first.Latest).IsNull();
 
         // The endpoint "recovers" — but the backoff record, not the endpoint,
@@ -149,7 +158,7 @@ public class UpdateChannelQueryTests : IDisposable {
         _server.Given(Request.Create().WithPath($"/@kurrent/kcap/{channel}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(200).WithBody("""{"version":"0.14.0"}"""));
 
-        var second = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root);
+        var second = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root, Npm);
         await Assert.That(second.Latest).IsNull();
         await Assert.That(second.FromCache).IsTrue();
 
@@ -162,13 +171,13 @@ public class UpdateChannelQueryTests : IDisposable {
     /// <c>kcap update</c>/<c>--check</c> invocation must always hit the
     /// network rather than silently reusing a retained failure result.
     /// </summary>
-    [Test, NotInParallel("UpdateCommand_RegistryBaseUrl")]
+    [Test]
     public async Task ForceCheck_bypasses_backoff_and_hits_network() {
         const string channel = "test-force-bypass";
         _server.Given(Request.Create().WithPath($"/@kurrent/kcap/{channel}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(503));
 
-        var first = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root);
+        var first = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root, Npm);
         await Assert.That(first.Latest).IsNull();
 
         _server.ResetMappings();
@@ -176,7 +185,7 @@ public class UpdateChannelQueryTests : IDisposable {
         _server.Given(Request.Create().WithPath($"/@kurrent/kcap/{channel}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(200).WithBody("""{"version":"0.15.0"}"""));
 
-        var forced = await UpdateCommand.CheckForUpdateAsync(forceCheck: true, channel, Config.Root);
+        var forced = await UpdateCommand.CheckForUpdateAsync(forceCheck: true, channel, Config.Root, Npm);
         await Assert.That(forced.Latest).IsEqualTo("0.15.0");
         await Assert.That(forced.FromCache).IsFalse();
 
@@ -192,12 +201,12 @@ public class UpdateChannelQueryTests : IDisposable {
         _server.Given(Request.Create().WithPath($"/@kurrent/kcap/{channel}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(200).WithBody("""{"dist-tags":{}}"""));
 
-        var first = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root);
+        var first = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root, Npm);
 
         await Assert.That(first.Latest).IsNull();
         await Assert.That(first.FromCache).IsFalse();
 
-        await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root);
+        await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root, Npm);
 
         var hits = _server.FindLogEntries(Request.Create().WithPath($"/@kurrent/kcap/{channel}").UsingGet());
         await Assert.That(hits.Count).IsEqualTo(2)
@@ -212,11 +221,11 @@ public class UpdateChannelQueryTests : IDisposable {
         _server.Given(Request.Create().WithPath($"/@kurrent/kcap/{channel}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(200).WithBody("not json"));
 
-        var first = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root);
+        var first = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root, Npm);
 
         await Assert.That(first.Latest).IsNull();
 
-        var second = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root);
+        var second = await UpdateCommand.CheckForUpdateAsync(forceCheck: false, channel, Config.Root, Npm);
 
         await Assert.That(second.FromCache).IsTrue();
 
@@ -233,7 +242,7 @@ public class UpdateChannelQueryTests : IDisposable {
         _server.Given(Request.Create().WithPath($"/@kurrent/kcap/{channel}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(200).WithBody("""{"version":"0.16.0"}"""));
 
-        await UpdateCommand.CheckForUpdateAsync(forceCheck: true, channel, Config.Root);
+        await UpdateCommand.CheckForUpdateAsync(forceCheck: true, channel, Config.Root, Npm);
 
         var sent = _server.FindLogEntries(Request.Create().WithPath($"/@kurrent/kcap/{channel}").UsingGet())
             .Single().RequestMessage;
