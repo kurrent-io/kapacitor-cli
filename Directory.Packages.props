@@ -23,7 +23,7 @@
     <PackageVersion Include="System.IO.Hashing" Version="10.0.11" />
     <PackageVersion Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
     <PackageVersion Include="NSubstitute" Version="6.2.0" />
-    <PackageVersion Include="ReactiveUI.Avalonia" Version="12.0.3" />
+    <PackageVersion Include="ReactiveUI.Avalonia" Version="12.1.1" />
     <PackageVersion Include="Spectre.Console" Version="0.55.2" />
     <PackageVersion Include="SvcSystems.UI.Terminal" Version="1.1.2" />
     <PackageVersion Include="Tomlyn" Version="2.4.0" />
