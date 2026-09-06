@@ -129,7 +129,7 @@ public class RoutedReplayPrivatizeTests : IDisposable {
         StubVisibilityPut();
     }
 
-    Task<int> RunAntigravityImport(bool forcePrivate) => new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home).HandleImport(
+    Task<int> RunAntigravityImport(bool forcePrivate) => new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home, new FixedCapacitorHttpClient()).HandleImport(
         filterCwd: null,
         minLines: 0,
         sources: [new AntigravityImportSource(new(new(_agHome), ""))],
@@ -243,7 +243,7 @@ public class RoutedReplayPrivatizeTests : IDisposable {
             .RespondWith(Response.Create().WithStatusCode(500));
         StubVisibilityPut();
 
-        var exitCode = await new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home).HandleImport(
+        var exitCode = await new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home, new FixedCapacitorHttpClient()).HandleImport(
             filterCwd: null,
             minLines: 0,
             sources: [new GeminiImportSource(_geminiHome)],

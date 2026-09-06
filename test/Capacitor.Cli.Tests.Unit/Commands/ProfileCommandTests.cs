@@ -19,7 +19,7 @@ public class ProfileCommandTests {
         await File.WriteAllTextAsync(configPath,
             JsonSerializer.Serialize(initial, ProfileConfigJsonContextIndented.Default.ProfileConfig));
 
-        var result = await new ProfileCommand(Config.Root).AddProfile(
+        var result = await new ProfileCommand(Config.Root, new FixedCapacitorHttpClient()).AddProfile(
             "contoso", "https://contoso.kcap.io",
             ["github.com/contoso/*"]
         );
@@ -47,7 +47,7 @@ public class ProfileCommandTests {
         await File.WriteAllTextAsync(configPath,
             JsonSerializer.Serialize(initial, ProfileConfigJsonContextIndented.Default.ProfileConfig));
 
-        var result = await new ProfileCommand(Config.Root).RemoveProfile("contoso");
+        var result = await new ProfileCommand(Config.Root, new FixedCapacitorHttpClient()).RemoveProfile("contoso");
 
         await Assert.That(result).IsEqualTo(0);
 
@@ -70,7 +70,7 @@ public class ProfileCommandTests {
             JsonSerializer.Serialize(initial, ProfileConfigJsonContextIndented.Default.ProfileConfig));
 
         // skipProbe defaults to true → no network, falls back to loopback heuristic.
-        var result = await new ProfileCommand(Config.Root).AddProfile(
+        var result = await new ProfileCommand(Config.Root, new FixedCapacitorHttpClient()).AddProfile(
             "contoso", "contoso.kcap.io", remotes: []);
 
         await Assert.That(result).IsEqualTo(0);
@@ -94,7 +94,7 @@ public class ProfileCommandTests {
         await File.WriteAllTextAsync(configPath,
             JsonSerializer.Serialize(initial, ProfileConfigJsonContextIndented.Default.ProfileConfig));
 
-        var result = await new ProfileCommand(Config.Root).RemoveProfile("default");
+        var result = await new ProfileCommand(Config.Root, new FixedCapacitorHttpClient()).RemoveProfile("default");
 
         await Assert.That(result).IsEqualTo(1);
 

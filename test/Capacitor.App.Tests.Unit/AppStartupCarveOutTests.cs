@@ -19,6 +19,8 @@ namespace Capacitor.App.Tests.Unit;
 public class AppStartupCarveOutTests {
     [TempConfigRoot] public required TempConfigRoot Config { get; init; }
 
+    OnboardingGate Gate() => new(Config.Root, AuthFixtures.NewTokenStore(Config.Root));
+
     const string ProfileName = "acme";
     const string ServerUrl = "https://acme.example";
 
@@ -40,14 +42,14 @@ public class AppStartupCarveOutTests {
         await Assert.That(AppUnderTest.AutoActionsPermanentlyClosed(new GateResult.Incomplete(reason))).IsTrue();
     }
 
-    // ---- End-to-end against a REAL new OnboardingGate(Config.Root).EvaluateAsync() ----
+    // ---- End-to-end against a REAL OnboardingGate.EvaluateAsync() ----
     // The two cases that apply without a wizard: valid URL + no token, and an invalid/non-HTTP URL.
 
     [Test]
     public async Task ValidUrl_noToken_fixture_closes_auto_actions() {
         WriteConfig(SingleProfileConfig(new Profile { ServerUrl = ServerUrl }));
 
-        var gate = (await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None)).Result;
+        var gate = (await Gate().EvaluateAsync(CancellationToken.None)).Result;
 
         await Assert.That(gate).IsTypeOf<GateResult.Incomplete>();
         await Assert.That(((GateResult.Incomplete)gate).Reason).IsEqualTo(GateReason.NoToken);
@@ -58,7 +60,7 @@ public class AppStartupCarveOutTests {
     public async Task InvalidNonHttpUrl_fixture_closes_auto_actions() {
         WriteConfig(SingleProfileConfig(new Profile { ServerUrl = "file:///tmp/x" }));
 
-        var gate = (await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None)).Result;
+        var gate = (await Gate().EvaluateAsync(CancellationToken.None)).Result;
 
         await Assert.That(gate).IsTypeOf<GateResult.Incomplete>();
         await Assert.That(((GateResult.Incomplete)gate).Reason).IsEqualTo(GateReason.InvalidServerUrl);
@@ -71,7 +73,7 @@ public class AppStartupCarveOutTests {
         var profile = new Profile { ServerUrl = ServerUrl, AuthProvider = new AuthProviderStamp("none", ServerUrl) };
         WriteConfig(SingleProfileConfig(profile));
 
-        var gate = (await new OnboardingGate(Config.Root).EvaluateAsync(CancellationToken.None)).Result;
+        var gate = (await Gate().EvaluateAsync(CancellationToken.None)).Result;
 
         await Assert.That(gate).IsTypeOf<GateResult.Complete>();
         await Assert.That(AppUnderTest.AutoActionsPermanentlyClosed(gate)).IsFalse();

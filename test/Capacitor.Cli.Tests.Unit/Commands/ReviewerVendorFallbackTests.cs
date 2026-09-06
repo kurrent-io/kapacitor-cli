@@ -17,10 +17,10 @@ namespace Capacitor.Cli.Tests.Unit.Commands;
 public class ReviewerVendorFallbackTests {
     [TempConfigRoot] public required TempConfigRoot Config { get; init; }
 
-    // The dispatch is profile-scoped: its token refresh resolves a profile. These tests exercise
-    // routing, not profile selection.
+    // Resolutions.None: these tests exercise routing, not profile selection.
     McpFlowsServer Server() =>
-        new(Config.Root, Resolutions.None(Config.Root));
+        new(Config.Root, Resolutions.None(Config.Root), AuthFixtures.NewTokenStore(Config.Root),
+            new FixedCapacitorHttpClient());
 
     // The wire shape TryParseCodedError accepts: a JSON object with a non-empty string "error"
     // plus a string "message" — the CLI-side reading of the server's FlowReviewerResultError.
@@ -578,7 +578,7 @@ public class ReviewerVendorFallbackTests {
         var sends = 0;
         using var client = new HttpClient();
 
-        var result = await Server().SendWithSettlementRetryAsync(
+        var result = await McpFlowsServer.SendWithSettlementRetryAsync(
             client, "https://flows.example.test",
             (_, _) => {
                 sends++;

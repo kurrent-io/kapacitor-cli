@@ -136,7 +136,7 @@ public class CopilotFinalizeDrainRunTests : IDisposable {
 
         var path = NewTranscript(tmp, AssistantLine + "\n" + ShutdownLine + "\n");
 
-        await new CopilotFinalizeDrainCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root)).RunAsync(
+        await new CopilotFinalizeDrainCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), new FixedCapacitorHttpClient()).RunAsync(
             sessionId, path,
             pollBudget: TimeSpan.FromSeconds(5),
             pollInterval: TimeSpan.FromMilliseconds(100)
@@ -156,7 +156,7 @@ public class CopilotFinalizeDrainRunTests : IDisposable {
 
         var path = NewTranscript(tmp, AssistantLine + "\n");
 
-        var runTask = new CopilotFinalizeDrainCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root)).RunAsync(
+        var runTask = new CopilotFinalizeDrainCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), new FixedCapacitorHttpClient()).RunAsync(
             sessionId, path,
             pollBudget: TimeSpan.FromSeconds(5),
             pollInterval: TimeSpan.FromMilliseconds(100)
@@ -182,7 +182,7 @@ public class CopilotFinalizeDrainRunTests : IDisposable {
 
         var path = NewTranscript(tmp, AssistantLine + "\n");
 
-        await new CopilotFinalizeDrainCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root)).RunAsync(
+        await new CopilotFinalizeDrainCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), new FixedCapacitorHttpClient()).RunAsync(
             sessionId, path,
             pollBudget: TimeSpan.FromMilliseconds(700),
             pollInterval: TimeSpan.FromMilliseconds(200)

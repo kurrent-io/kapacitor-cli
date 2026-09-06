@@ -7,6 +7,8 @@ using WireMock.ResponseBuilders;
 using WireMock.Server;
 using Capacitor.Cli.Core.Harness.Cursor;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Tests.Unit.Commands;
 
 // Acceptance tests reusing existing pure/HTTP seams. Where a criterion is already fully covered
@@ -45,7 +47,7 @@ public class LiveWatchHardeningAcceptanceTests {
     // the drain below needs an unreachable server rather than an unusable URL.
     const string Unreachable = "http://127.0.0.1:1";
 
-    AgentHookPoster  Poster => field ??= new(Config.Root, Resolutions.At(Unreachable, Config.Root));
+    AgentHookPoster  Poster => field ??= new(Config.Root, Resolutions.At(Unreachable, Config.Root), new FixedCapacitorHttpClient());
 
     CursorMarkers Markers => new(Config.Root);
 
@@ -84,7 +86,7 @@ public class LiveWatchHardeningAcceptanceTests {
             var sessionId = Guid.NewGuid().ToString("N");
 
             var outcome = await Poster.PostOrSpoolAsync(
-                () => Task.FromResult<(HttpClient, AuthStatus)>((new HttpClient(), AuthStatus.Expired)), route, """{"session_id":"x"}""",
+                () => Task.FromResult(new AuthAttempt(new HttpClient(), AuthStatus.Expired)), route, """{"session_id":"x"}""",
                 agentTag: route, spool, sessionId, route);
 
             await Assert.That(outcome).IsEqualTo(HookPostOutcome.Spooled);

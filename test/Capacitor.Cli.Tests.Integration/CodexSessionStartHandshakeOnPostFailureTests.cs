@@ -56,7 +56,7 @@ public class CodexSessionStartHandshakeOnPostFailureTests : IDisposable {
 
         using var capture = ConsoleOutput.StartCapture();
 
-        var exit = await new CodexHookCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), new HookClock(TimeProvider.System), Home).Handle(new StringReader(payload));
+        var exit = await new CodexHookCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).Handle(new StringReader(payload));
 
         // The rejection is still reported — this is not "pretend it worked".
         await Assert.That(exit).IsEqualTo(1);

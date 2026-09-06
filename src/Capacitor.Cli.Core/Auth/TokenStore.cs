@@ -2,6 +2,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Capacitor.Cli.Core.Config;
+using Capacitor.Cli.Core.Http;
 
 namespace Capacitor.Cli.Core.Auth;
 
@@ -58,7 +59,7 @@ public sealed record TokenResolution(
 // treats Contended quietly — no warning, no backoff.
 public enum ProactiveRefreshOutcome { NotDue, Refreshed, Failed, Contended }
 
-public sealed class TokenStore(ConfigRoot config) {
+public sealed class TokenStore(ConfigRoot config, IHttpClientFactory httpFactory, WorkOSClient workos) {
     string LegacyTokenPath { get; } = config.Path("tokens.json");
     string TokenDir        { get; } = config.Path("tokens");
 
@@ -634,16 +635,16 @@ public sealed class TokenStore(ConfigRoot config) {
         // The localhost default is a fallback, not evidence of where the token was minted.
         var stamped = tokens.ServerUrl ?? (configured is not null ? ServerIdentity.Canonicalize(configured) : null);
 
-        // PostWithRetryAsync runs EnsureAbsolute, which Environment.Exit(2)s on a scheme-less URL.
-        // Refresh is reached from daemon/background callers via GetValidTokensForProfileAsync and must fail
-        // gracefully (return null), never terminate the process — so validate here instead of
-        // letting the retry helper exit. The hook *entry* paths still EnsureAbsolute-and-exit by
-        // design; this guard only covers the refresh call.
+        // Reached from daemon/background callers via GetValidTokensForProfileAsync, which expects a
+        // stale-token failure here, not an exception — so an unusable URL degrades to null rather
+        // than the UnusableServerUrlException an interactive command path would throw.
         if (!HttpClientExtensions.IsAcceptableUrl(url)) {
             return null;
         }
 
-        using var http = new HttpClient();
+        // The anonymous lane: this posts to our own server, but the token travels in the body, so
+        // there is no bearer to rotate and a recovery handler here would recurse into this refresh.
+        using var http = httpFactory.CreateClient(CapacitorClients.Anonymous);
 
         var requestBody = JsonSerializer.Serialize(
             new() { AccessToken = tokens.AccessToken },
@@ -678,55 +679,23 @@ public sealed class TokenStore(ConfigRoot config) {
         }
     }
 
-    static Task<StoredTokens?> RefreshWorkOSAsync(StoredTokens tokens) =>
+    Task<StoredTokens?> RefreshWorkOSAsync(StoredTokens tokens) =>
         RefreshWorkOSAsync(tokens, CancellationToken.None);
 
-    static async Task<StoredTokens?> RefreshWorkOSAsync(StoredTokens tokens, CancellationToken ct) {
-        // Mirror RefreshGitHubAsync: network/parse failures return null (caller surfaces
-        // "run kcap login") rather than throwing out of GetValidTokensForProfileAsync and crashing.
-        try {
-            using var http = new HttpClient();
+    async Task<StoredTokens?> RefreshWorkOSAsync(StoredTokens tokens, CancellationToken ct) {
+        var json = await workos.RefreshAsync(tokens.ClientId!, tokens.RefreshToken!, ct);
 
-            // Retries only transport failures. WorkOS rotates the refresh token on each
-            // successful use, so a retry after the server already rotated (response lost in
-            // transit) would re-send the now-consumed token. That reuse window already exists
-            // without retry — the next refresh call re-reads the same unrotated token from disk
-            // and re-sends it — so the short retry doesn't add a new failure mode; it just rides
-            // out the common case where the request never reached WorkOS.
-            using var response = await http.PostWithRetryAsync(
-                "https://api.workos.com/user_management/authenticate",
-                new FormUrlEncodedContent(
-                    new Dictionary<string, string> {
-                        ["grant_type"]    = "refresh_token",
-                        ["client_id"]     = tokens.ClientId!,
-                        ["refresh_token"] = tokens.RefreshToken!
-                    }
-                ),
-                RefreshRetryBudget,
-                ct
-            );
-
-            if (!response.IsSuccessStatusCode) {
-                return null;
-            }
-
-            var json = await response.Content.ReadFromJsonAsync(
-                CapacitorJsonContext.Default.WorkOSAuthResponse, ct);
-
-            if (json is null) {
-                return null;
-            }
-
-            // Persistence is the caller's responsibility (RefreshWithCrossProcessLockAsync saves
-            // under the locked profile) — see RefreshGitHubAsync. WorkOS rotates the refresh token
-            // on use, so writing under the wrong profile would be especially damaging.
-            return tokens with {
-                AccessToken = json.AccessToken,
-                ExpiresAt = JwtExpiry(json.AccessToken),
-                RefreshToken = json.RefreshToken ?? tokens.RefreshToken
-            };
-        } catch {
+        if (json is null) {
             return null;
         }
+
+        // Persistence is the caller's responsibility (RefreshWithCrossProcessLockAsync saves under the
+        // locked profile) — see RefreshGitHubAsync. WorkOS rotates the refresh token on use, so writing
+        // under the wrong profile would be especially damaging.
+        return tokens with {
+            AccessToken  = json.AccessToken,
+            ExpiresAt    = JwtExpiry(json.AccessToken),
+            RefreshToken = json.RefreshToken ?? tokens.RefreshToken
+        };
     }
 }

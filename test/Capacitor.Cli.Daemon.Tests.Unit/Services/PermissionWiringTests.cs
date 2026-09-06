@@ -1,3 +1,4 @@
+using Capacitor.Cli.Core.Http;
 using Capacitor.Cli.Daemon.Pty;
 using Capacitor.Cli.Daemon.Services;
 using Microsoft.Extensions.DependencyInjection;
@@ -57,6 +58,7 @@ public class PermissionWiringTests {
         services.AddSingleton<ILoggerFactory>(NullLoggerFactory.Instance);
         services.AddSingleton(typeof(ILogger<>), typeof(NullLogger<>));
         services.AddSingleton(Config.Root);
+        services.AddSingleton(AuthFixtures.NewTokenStore(Config.Root));
         services.AddSingleton<DaemonStatusNotifier>();
         services.AddSingleton(Home.Home);
         services.AddSingleton<ServerConnection>();
@@ -64,6 +66,7 @@ public class PermissionWiringTests {
         services.AddSingleton<RepoMatcher>();
         services.AddSingleton<IPtyProcessFactory>(new NoopPtyProcessFactory());
         services.AddSingleton<IHttpClientFactory>(new NoopHttpClientFactory());
+        services.AddSingleton<ICapacitorHttpClient>(new FixedCapacitorHttpClient());
         services.AddSingleton<IReadOnlyDictionary<string, IHostedAgentLauncher>>(
             new Dictionary<string, IHostedAgentLauncher>());
         services.AddSingleton<IReadOnlyDictionary<string, IHostedAgentRuntimeFactory>>(

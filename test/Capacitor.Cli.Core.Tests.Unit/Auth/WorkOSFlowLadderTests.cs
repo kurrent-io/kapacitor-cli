@@ -84,14 +84,15 @@ public class WorkOSFlowLadderTests {
     [Test]
     public async Task Explicit_device_request_never_opens_a_browser() {
         using var server  = DeviceGrantServer();
-        using var http    = new HttpClient();
+        using var stub    = new StubHost(server.Urls[0]);
+        var       workos = new WorkOSClient(new PlainHttpClientFactory(stub));
         var       browser = new FakeBrowser(_ => throw new InvalidOperationException("the browser must not be invoked"));
 
         var opener = new RecordingBrowser(opens: false);
 
         var result = await OAuthLoginFlow.AcquireWorkOSAsync(
-            http, "client_d", organizationId: null, forceDevice: true, opener, browser,
-            server.Urls[0], progress: new RecordingAuthProgress(), keys: ScriptedKeyWatcher.Blind());
+            workos, "client_d", organizationId: null, forceDevice: true, opener, browser,
+            progress: new RecordingAuthProgress(), keys: ScriptedKeyWatcher.Blind());
 
         await Assert.That(result!.AccessToken).IsEqualTo("acc");
         // The device page, never the authorize URL: "opens no browser" means no LOOPBACK browser.
@@ -101,13 +102,14 @@ public class WorkOSFlowLadderTests {
     [Test]
     public async Task The_escape_hatch_abandons_the_browser_for_the_device_grant() {
         using var server   = DeviceGrantServer();
-        using var http     = new HttpClient();
+        using var stub     = new StubHost(server.Urls[0]);
+        var       workos   = new WorkOSClient(new PlainHttpClientFactory(stub));
         var       keys     = new ScriptedKeyWatcher('d');
         var       progress = new RecordingAuthProgress();
 
         var result = await OAuthLoginFlow.AcquireWorkOSAsync(
-            http, "client_d", organizationId: null, forceDevice: false, new RecordingBrowser(opens: false), new HangingBrowser(),
-            server.Urls[0], progress: progress, keys: keys);
+            workos, "client_d", organizationId: null, forceDevice: false, new RecordingBrowser(opens: false), new HangingBrowser(),
+            progress: progress, keys: keys);
 
         await Assert.That(result!.AccessToken).IsEqualTo("acc");
         await Assert.That(progress.DeviceCodes).Count().IsEqualTo(1);
@@ -125,12 +127,13 @@ public class WorkOSFlowLadderTests {
     [Test]
     public async Task Drains_what_is_still_buffered_before_handing_off() {
         using var server = DeviceGrantServer();
-        using var http   = new HttpClient();
+        using var stub   = new StubHost(server.Urls[0]);
+        var       workos = new WorkOSClient(new PlainHttpClientFactory(stub));
         var       keys   = new ScriptedKeyWatcher('d', '\r', '\n');
 
         await OAuthLoginFlow.AcquireWorkOSAsync(
-            http, "client_d", organizationId: null, forceDevice: false, new RecordingBrowser(opens: false), new HangingBrowser(),
-            server.Urls[0], progress: new RecordingAuthProgress(), keys: keys);
+            workos, "client_d", organizationId: null, forceDevice: false, new RecordingBrowser(opens: false), new HangingBrowser(),
+            progress: new RecordingAuthProgress(), keys: keys);
 
         await Assert.That(keys.Drained).IsEqualTo(2);
         await Assert.That(keys.KeyAvailable).IsFalse();
@@ -141,12 +144,13 @@ public class WorkOSFlowLadderTests {
     [Test]
     public async Task A_cancelled_browser_sign_in_does_not_fall_through_to_the_device_grant() {
         using var server = DeviceGrantServer();
-        using var http   = new HttpClient();
+        using var stub   = new StubHost(server.Urls[0]);
+        var       workos = new WorkOSClient(new PlainHttpClientFactory(stub));
 
         var result = await OAuthLoginFlow.AcquireWorkOSAsync(
-            http, "client_d", organizationId: null, forceDevice: false, new RecordingBrowser(),
+            workos, "client_d", organizationId: null, forceDevice: false, new RecordingBrowser(),
             FakeBrowser.NonSuccess(Duende.IdentityModel.OidcClient.Browser.BrowserResultType.UserCancel),
-            server.Urls[0], progress: new RecordingAuthProgress(), keys: ScriptedKeyWatcher.Blind());
+            progress: new RecordingAuthProgress(), keys: ScriptedKeyWatcher.Blind());
 
         await Assert.That(result).IsNull();
         await Assert.That(server.LogEntries.Any(e => e.RequestMessage.Path.Contains("authorize/device"))).IsFalse();
@@ -157,13 +161,14 @@ public class WorkOSFlowLadderTests {
     [Test]
     public async Task A_loopback_bind_failure_falls_through_to_the_device_grant() {
         using var server   = DeviceGrantServer();
-        using var http     = new HttpClient();
+        using var stub     = new StubHost(server.Urls[0]);
+        var       workos   = new WorkOSClient(new PlainHttpClientFactory(stub));
         var       progress = new RecordingAuthProgress();
 
         var result = await OAuthLoginFlow.AcquireWorkOSAsync(
-            http, "client_d", organizationId: null, forceDevice: false, new RecordingBrowser(opens: false),
+            workos, "client_d", organizationId: null, forceDevice: false, new RecordingBrowser(opens: false),
             new FakeBrowser(_ => throw new HttpListenerException(5, "Access is denied")),
-            server.Urls[0], progress: progress, keys: ScriptedKeyWatcher.Blind());
+            progress: progress, keys: ScriptedKeyWatcher.Blind());
 
         await Assert.That(result!.AccessToken).IsEqualTo("acc");
         await Assert.That(string.Join("\n", progress.Errors)).Contains("Could not bind loopback listener");
@@ -178,13 +183,14 @@ public class WorkOSFlowLadderTests {
     [Test]
     public async Task No_browser_on_this_machine_falls_through_to_the_device_grant() {
         using var server   = DeviceGrantServer();
-        using var http     = new HttpClient();
+        using var stub     = new StubHost(server.Urls[0]);
+        var       workos   = new WorkOSClient(new PlainHttpClientFactory(stub));
         var       progress = new RecordingAuthProgress();
 
         var result = await OAuthLoginFlow.AcquireWorkOSAsync(
-            http, "client_d", organizationId: null, forceDevice: false,
+            workos, "client_d", organizationId: null, forceDevice: false,
             new RecordingBrowser(opens: false), new FakeBrowser(_ => throw new BrowserLaunchException()),
-            server.Urls[0], progress: progress, keys: ScriptedKeyWatcher.Blind());
+            progress: progress, keys: ScriptedKeyWatcher.Blind());
 
         await Assert.That(result!.AccessToken).IsEqualTo("acc");
         await Assert.That(string.Join("\n", progress.Notices)).Contains("use anywhere");
@@ -218,12 +224,13 @@ public class WorkOSFlowLadderTests {
     [Test]
     public async Task A_caller_cancel_propagates_rather_than_falling_through() {
         using var server = DeviceGrantServer();
-        using var http   = new HttpClient();
+        using var stub   = new StubHost(server.Urls[0]);
+        var       workos = new WorkOSClient(new PlainHttpClientFactory(stub));
         using var cts    = new CancellationTokenSource();
         await cts.CancelAsync();
 
         await Assert.That(async () => await OAuthLoginFlow.AcquireWorkOSAsync(
-                  http, "client_d", organizationId: null, forceDevice: false,
+                  workos, "client_d", organizationId: null, forceDevice: false,
                   new RecordingBrowser(), new HangingBrowser(),
                   server.Urls[0], cts.Token, new RecordingAuthProgress(), ScriptedKeyWatcher.Blind()))
             .Throws<OperationCanceledException>();

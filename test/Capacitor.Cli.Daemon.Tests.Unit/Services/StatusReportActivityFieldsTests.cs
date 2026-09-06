@@ -179,6 +179,7 @@ public class StatusReportActivityFieldsTests {
     /// this test does not depend on that being true forever.</summary>
     sealed class StatusReportCountingServerConnection(bool throwOnSend = false) : ServerConnection(
         new() { Name = "test", ServerUrl = "http://127.0.0.1:1" },
+        UnusedTokenStore.Create(),
         NullLoggerFactory.Instance,
         NullLogger<ServerConnection>.Instance
     ) {

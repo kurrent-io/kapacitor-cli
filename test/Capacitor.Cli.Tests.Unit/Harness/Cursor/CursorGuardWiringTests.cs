@@ -19,7 +19,7 @@ public class CursorGuardWiringTests {
     [TempHome] public required TempHome Home { get; init; }
 
     WatchCommand? _watch;
-    WatchCommand Watch => _watch ??= new(Config.Root, Resolutions.None(Config.Root), Home);
+    WatchCommand Watch => _watch ??= new(Config.Root, Resolutions.None(Config.Root), Home, new FixedCapacitorHttpClient(), new FixedCredentialSource());
 
     CursorMarkers Markers => new(Config.Root);
 

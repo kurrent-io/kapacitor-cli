@@ -35,13 +35,13 @@ public class AuthProgressTests {
                 ? JsonResponse("""{"error":"authorization_pending"}""")
                 : JsonResponse("""{"access_token":"tok"}""");
         });
-        using var http = new HttpClient(handler);
-
+        var github   = new GitHubOAuthClient(new PlainHttpClientFactory(handler));
         var progress = new RecordingAuthProgress();
 
         using var capture = ConsoleOutput.StartCapture();
 
-        var token = await OAuthLoginFlow.RunDeviceFlowAsync(http, "client_id", new RecordingBrowser(), progress: progress);
+        var token = await OAuthLoginFlow.RunDeviceFlowAsync(
+            github, "client_id", new RecordingBrowser(), progress: progress);
 
         await Assert.That(token).IsEqualTo("tok");
         await Assert.That(progress.DeviceCodes).Count().IsEqualTo(1);

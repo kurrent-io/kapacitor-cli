@@ -20,6 +20,7 @@ namespace Capacitor.Cli.Tests.Unit.Harness.Antigravity;
 /// lives in SessionStartMemoryFoundationTests (the Antigravity_* tests), next to the lease fixtures.
 /// </summary>
 public class AntigravitySessionStartMemoryTests {
+
     [TempHome] public required TempHome Home { get; init; }
 
     // Instance, not static: the hook writes under the config dir (the repo-detection cache,
@@ -28,7 +29,7 @@ public class AntigravitySessionStartMemoryTests {
     // The server URL is the resolution's, so a test proving the url guard fires hands in the bad one
     // here rather than as an argument.
     AntigravityHookCommand Hook(string serverUrl = "https://example.test") =>
-        new(Config.Root, Resolutions.At(serverUrl, Config.Root), new HookClock(TimeProvider.System), Home);
+        new(Config.Root, Resolutions.At(serverUrl, Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient());
     [TempConfigRoot] public required TempConfigRoot Config { get; init; }
 
     static string Write(string? fragment) {
@@ -113,8 +114,8 @@ public class AntigravitySessionStartMemoryTests {
 
     [Test]
     public async Task Fetch_is_skipped_when_disabled_or_unscoped_or_out_of_budget() {
-        // Each guard alone must suppress the fetch. A non-postable base url is checked
-        // BEFORE any client is built, because EnsureAbsolute calls Environment.Exit(2).
+        // Each guard alone must suppress the fetch. A non-postable base url is checked BEFORE
+        // any client is built: an unusable URL should spend no budget, no lease, and start no task.
         // Both lanes off ⇒ suppressed; a single lane off would still fetch.
         await Assert.That(await Hook().StartMemoryIndexTask("e80c33bfc10f4d2fb626b0043f488fc0", "/repo",
             disabled: true, guidelinesDisabled: true, TimeSpan.FromSeconds(5))).IsNull();
@@ -148,7 +149,7 @@ public class AntigravitySessionStartMemoryTests {
     [Test]
     public async Task A_non_PreInvocation_event_writes_nothing_and_exits_zero() {
         var sw   = new StringWriter();
-        var code = await new AntigravityHookCommand(Config.Root, Resolutions.At("https://example.test", Config.Root), new HookClock(TimeProvider.System), Home).Handle(["--antigravity", "Stop"], new StringReader("{}"), sw);
+        var code = await new AntigravityHookCommand(Config.Root, Resolutions.At("https://example.test", Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).Handle(["--antigravity", "Stop"], new StringReader("{}"), sw);
 
         await Assert.That(code).IsEqualTo(0);
         await Assert.That(sw.ToString()).IsEqualTo("");
@@ -157,7 +158,7 @@ public class AntigravitySessionStartMemoryTests {
     [Test]
     public async Task A_malformed_payload_writes_nothing_and_exits_zero() {
         var sw   = new StringWriter();
-        var code = await new AntigravityHookCommand(Config.Root, Resolutions.At("https://example.test", Config.Root), new HookClock(TimeProvider.System), Home).Handle(["--antigravity", "PreInvocation"], new StringReader("{not json"), sw);
+        var code = await new AntigravityHookCommand(Config.Root, Resolutions.At("https://example.test", Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).Handle(["--antigravity", "PreInvocation"], new StringReader("{not json"), sw);
 
         await Assert.That(code).IsEqualTo(0);
         await Assert.That(sw.ToString()).IsEqualTo("");
@@ -233,7 +234,7 @@ public class AntigravitySessionStartMemoryTests {
 
         var consulted = false;
         var sw        = new StringWriter();
-     var code = await new AntigravityHookCommand(Config.Root, Resolutions.At("https://example.test", Config.Root), new HookClock(TimeProvider.System), Home).Handle(["--antigravity", "PreInvocation"],
+     var code = await new AntigravityHookCommand(Config.Root, Resolutions.At("https://example.test", Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).Handle(["--antigravity", "PreInvocation"],
             new StringReader($$"""
                 {"conversationId":"{{conversationId}}","transcriptPath":"/tmp/t.jsonl","workspacePaths":[]}
                 """),

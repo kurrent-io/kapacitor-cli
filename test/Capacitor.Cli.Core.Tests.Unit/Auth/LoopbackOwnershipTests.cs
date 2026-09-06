@@ -44,6 +44,10 @@ namespace Capacitor.Cli.Core.Tests.Unit.Auth;
 /// tripwire for the mistakes people actually make, not a proof.</para>
 /// </summary>
 public class LoopbackOwnershipTests {
+    // The code exchange rides the sign-in lane; against a stub, an unconfigured client is what
+    // that lane resolves to.
+    static readonly GitHubOAuthClient Github = new(new PlainHttpClientFactory());
+
     /// <summary>
     /// Whitespace, line breaks and block comments — what the compiler ignores between two tokens, and
     /// therefore what this file's patterns must ignore too, at EVERY junction.
@@ -95,7 +99,7 @@ public class LoopbackOwnershipTests {
         var fake = new DisposableFakeBrowser("?code=abc&state=mismatch");
 
         var token = await OAuthLoginFlow.RunGitHubBrowserFlowAsync(
-            "client-id", "http://127.0.0.1:1/exchange", new RecordingBrowser(),
+            Github, "client-id", "http://127.0.0.1:1/exchange", new RecordingBrowser(),
             browser: fake, timeout: TimeSpan.FromSeconds(1));
 
         await Assert.That(token).IsNull();

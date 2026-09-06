@@ -347,9 +347,11 @@ public static partial class DaemonRunner {
 
         builder.Services.AddSingleton(paths);
         builder.Services.AddSingleton(configRoot);
+        builder.Services.AddSingleton(config.Profiles);
         builder.Services.AddSingleton(userHome);
         builder.Services.AddSingleton(config);
         builder.Services.AddSingleton(daemonLock);
+        builder.Services.AddDaemonHttp(configRoot, config);
         builder.Services.AddSingleton<ServerConnection>();
 
         // The owner consent gate — policy store + append-only decision log share the

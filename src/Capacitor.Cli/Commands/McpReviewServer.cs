@@ -11,9 +11,11 @@ using Capacitor.Cli.Core.Commands;
 using Capacitor.Cli.Core.Telemetry;
 using Capacitor.Cli.Core.Config;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands;
 
-sealed class McpReviewServer(ConfigRoot config, ProfileContext profiles) {
+sealed class McpReviewServer(ConfigRoot config, ProfileContext profiles, TokenStore tokens, ICapacitorHttpClient http) {
     /// <summary>
     /// Run with an explicit session-default PR (used by <c>kcap review &lt;pr&gt;</c>).
     /// Tool calls may still override the default by passing a <c>pr</c> argument.
@@ -41,7 +43,7 @@ sealed class McpReviewServer(ConfigRoot config, ProfileContext profiles) {
         // "mcp-server" so per-tool-call events actually leave. Best-effort: a stale token on
         // disk must never block the server from starting.
         var loggedIn = false;
-        try { loggedIn = await new TokenStore(config).LoadForProfileAsync(profiles.Name) is not null; } catch { }
+        try { loggedIn = await tokens.LoadForProfileAsync(profiles.Name) is not null; } catch { }
         CliTelemetry.Initialize("mcp-server", baseUrl, loggedIn, config);
 
         // Validate the server_url shape once, locally (pure string check — no network, token,
@@ -58,16 +60,14 @@ sealed class McpReviewServer(ConfigRoot config, ProfileContext profiles) {
         HttpClient? client = null;
 
         // Guarded tool dispatch: never let the stdio JSON-RPC loop die on one bad request. An
-        // unusable server_url would otherwise reach EnsureAbsolute inside the auth-client factory,
-        // which hard-exits the process (Environment.Exit(2)) mid-request; and an unexpected
-        // failure would bubble out of the loop. Return a JSON-RPC tool error in both cases so the
-        // server keeps serving.
+        // unexpected failure would otherwise bubble out of the loop and kill the server mid-protocol;
+        // return a JSON-RPC tool error instead so it keeps serving.
         async Task<string> DispatchToolCallAsync(JsonNode callId, JsonObject callRequest) {
             if (!urlOk)
                 return BuildToolResult(callId, HttpClientExtensions.SchemeMissingHint, isError: true);
 
             try {
-                client ??= await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
+                client ??= await http.ForSessionAsync();
                 return await HandleToolCallAsync(callId, callRequest, client, baseUrl, sessionDefault);
             } catch (Exception ex) {
                 // Unexpected: log the detail to stderr (not to the client, which could leak local

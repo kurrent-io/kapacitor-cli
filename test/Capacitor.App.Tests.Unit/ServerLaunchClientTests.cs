@@ -40,7 +40,7 @@ public class ServerLaunchClientTests {
         try {
             var config = new ConfigRoot(tmp.Path);
             await using var client = new ServerLaunchClient(
-                config, Resolutions.At($"http://127.0.0.1:{port}", config));
+                Resolutions.At($"http://127.0.0.1:{port}", config), AuthFixtures.NewTokenStore(config));
 
             var outcome = await client.StartAsync(Request, CancellationToken.None);
 
@@ -56,7 +56,7 @@ public class ServerLaunchClientTests {
         using var tmp = new TempDir();
         var config = new ConfigRoot(tmp.Path);
         await using var client = new ServerLaunchClient(
-            config, Resolutions.At($"http://127.0.0.1:{FreePort()}", config));
+            Resolutions.At($"http://127.0.0.1:{FreePort()}", config), AuthFixtures.NewTokenStore(config));
 
         var outcome = await client.StartAsync(Request, CancellationToken.None);
 

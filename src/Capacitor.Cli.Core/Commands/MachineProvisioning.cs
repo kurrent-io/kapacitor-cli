@@ -47,3 +47,25 @@ public sealed record RegisterMachineResponse {
     [JsonPropertyName("service_id")] public string ServiceId { get; init; } = "";
     [JsonPropertyName("user_id")]    public string UserId    { get; init; } = "";
 }
+
+/// <summary>Why provisioning produced no application.</summary>
+public enum MachineProvisioningError {
+    None,
+    Unauthorized,
+    Forbidden,
+    Rejected,
+    Unreachable
+}
+
+/// <summary>
+/// The proxy's answer to a provisioning request. <c>Rejected</c> carries the proxy's own status and
+/// body, because the operator cannot act on "it failed" alone; <c>Unreachable</c> carries the
+/// transport message. A <c>None</c> with no application means the proxy answered but disclosed no
+/// credential — which is the same dead end as a create that returns an empty secret.
+/// </summary>
+public sealed record MachineProvisioningResult(
+        CreateMachineApplicationResponse? Application,
+        MachineProvisioningError          Error,
+        int                               Status = 0,
+        string?                           Detail = null
+    );

@@ -8,6 +8,8 @@ using Capacitor.Cli.Core.Harness.Gemini;
 using Capacitor.Cli.Core.Harness.Kiro;
 using Capacitor.Cli.Services;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands;
 
 /// <summary>
@@ -25,7 +27,9 @@ namespace Capacitor.Cli.Commands;
 /// Per-agent selective cleanup is intentionally out of scope here; this command
 /// covers all known agents.
 /// </summary>
-public sealed class UninstallCommand(DaemonStore store, ConfigRoot config, ProfileContext profiles, UserHome home) {
+public sealed class UninstallCommand(
+        DaemonStore store, ConfigRoot config, ProfileContext profiles, UserHome home,
+        ICapacitorHttpClient http) {
     readonly HarnessPaths _paths = HarnessPaths.FromEnvironment(home);
 
     public async Task<int> HandleAsync(string[] args) {
@@ -120,7 +124,7 @@ public sealed class UninstallCommand(DaemonStore store, ConfigRoot config, Profi
         if (await new DaemonCommands(store, config, profiles, home).HandleAsync(["daemon", "stop", "--yes"]) != 0) hadFailures = true;
 
         // Kill any orphaned watcher PIDs that the daemon stop didn't catch.
-        if (await new CleanupCommand(config, profiles).HandleCleanup() != 0) hadFailures = true;
+        if (await new CleanupCommand(config, profiles, http).HandleCleanup() != 0) hadFailures = true;
 
         var env           = PluginEnvironment.FromProcess(await AppConfig.LoadProfileConfig(config), home);
         var pluginCommand = new PluginCommand(env);

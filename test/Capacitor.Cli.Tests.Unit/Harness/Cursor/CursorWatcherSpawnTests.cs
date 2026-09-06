@@ -25,7 +25,7 @@ public class CursorWatcherSpawnTests {
 
     static string NewSessionId() => Guid.NewGuid().ToString("N");
 
-    CursorHookCommand Hook(ConfigRoot root) => new(root, Resolutions.At("http://s", root), new HookClock(TimeProvider.System), Home);
+    CursorHookCommand Hook(ConfigRoot root) => new(root, Resolutions.At("http://s", root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient());
 
     [Test]
     public async Task SessionEnd_never_spawns() =>
@@ -199,7 +199,7 @@ public class CursorWatcherSpawnTests {
             // — asserting it straight after Append (as this test previously did) could not fail,
             // since no production code had run yet.
             startFails = true;
-            await new CursorHookCommand(Config.Root, Resolutions.At("http://s", Config.Root), new HookClock(TimeProvider.System), Home).HandleCore(
+            await new CursorHookCommand(Config.Root, Resolutions.At("http://s", Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).HandleCore(
                 client,
                 new StringReader($$"""{"hook_event_name":"postToolUse","session_id":"{{child}}","tool_name":"Bash"}"""),
                 spool);
@@ -212,7 +212,7 @@ public class CursorWatcherSpawnTests {
             // (before the isSubagentChild divert even runs), and that success is what must
             // trigger the deferred spawn.
             startFails = false;
-            await new CursorHookCommand(Config.Root, Resolutions.At("http://s", Config.Root), new HookClock(TimeProvider.System), Home).HandleCore(
+            await new CursorHookCommand(Config.Root, Resolutions.At("http://s", Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).HandleCore(
                 client,
                 new StringReader($$"""{"hook_event_name":"postToolUse","session_id":"{{child}}","tool_name":"Bash"}"""),
                 spool);
@@ -278,7 +278,7 @@ public class CursorWatcherSpawnTests {
             // 2nd invocation: any later hook for this child. HandleCore's generic top-of-method
             // spool drain retries the spooled subagent-start FIRST — this time it 400s, which
             // HookSpool treats as a permanent Drop (the entry is discarded, not re-queued).
-            await new CursorHookCommand(Config.Root, Resolutions.At("http://s", Config.Root), new HookClock(TimeProvider.System), Home).HandleCore(
+            await new CursorHookCommand(Config.Root, Resolutions.At("http://s", Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).HandleCore(
                 client,
                 new StringReader($$"""{"hook_event_name":"afterAgentThought","session_id":"{{child}}","generation_id":"g","text":"t","transcript_path":"{{childFileEscaped}}"}"""),
                 spool);
@@ -286,7 +286,7 @@ public class CursorWatcherSpawnTests {
             // 3rd invocation: another content-less hook. Before the fix, the dropped start left
             // HasBacklog false and this would run the agent-routed transcript backfill despite
             // SubagentStarted never having been appended.
-            await new CursorHookCommand(Config.Root, Resolutions.At("http://s", Config.Root), new HookClock(TimeProvider.System), Home).HandleCore(
+            await new CursorHookCommand(Config.Root, Resolutions.At("http://s", Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).HandleCore(
                 client,
                 new StringReader($$"""{"hook_event_name":"postToolUse","session_id":"{{child}}","tool_name":"Bash","transcript_path":"{{childFileEscaped}}"}"""),
                 spool);

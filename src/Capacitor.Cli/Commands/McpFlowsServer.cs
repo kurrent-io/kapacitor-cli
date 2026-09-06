@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Net;
-using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
@@ -10,11 +9,13 @@ using System.Text.Json.Serialization.Metadata;
 using Capacitor.Cli.Core;
 using Capacitor.Cli.Core.Auth;
 using Capacitor.Cli.Core.Config;
+using Capacitor.Cli.Core.Http;
 using Capacitor.Cli.Core.Telemetry;
 
 namespace Capacitor.Cli.Commands;
 
-class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
+class McpFlowsServer(
+        ConfigRoot config, ProfileContext profiles, TokenStore store, ICapacitorHttpClient http) {
     public async Task<int> RunAsync(string? driverArg = null) {
         var baseUrl = profiles.Resolution.ServerUrl!;
 
@@ -38,7 +39,7 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
         // "mcp-server" so per-tool-call events actually leave. Best-effort: a stale token on
         // disk must never block the server from starting.
         var loggedIn = false;
-        try { loggedIn = await new TokenStore(config).LoadForProfileAsync(profiles.Name) is not null; } catch { }
+        try { loggedIn = await store.LoadForProfileAsync(profiles.Name) is not null; } catch { }
         CliTelemetry.Initialize("mcp-server", baseUrl, loggedIn, config);
 
         // Validate the server_url shape once, locally (pure string check — no network, token,
@@ -55,17 +56,15 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
         HttpClient? client = null;
 
         // Guarded tool dispatch: never let the stdio JSON-RPC loop die on one bad request. An
-        // unusable server_url would otherwise reach EnsureAbsolute inside the auth-client factory,
-        // which hard-exits the process (Environment.Exit(2)) mid-request; and an unexpected
-        // failure would bubble out of the loop. Return a JSON-RPC tool error in both cases so the
-        // server keeps serving.
+        // unexpected failure would otherwise bubble out of the loop and kill the server mid-protocol;
+        // return a JSON-RPC tool error instead so it keeps serving.
         async Task<string> DispatchToolCallAsync(JsonNode callId, JsonObject callRequest) {
             if (!urlOk)
                 return BuildToolResult(callId, HttpClientExtensions.SchemeMissingHint, isError: true);
 
             try {
                 if (client is null) {
-                    client = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl, autoRetryUnauthorized: false);
+                    client = await http.ForSessionAsync();
                     // the review-flow endpoints long-poll (start_review_flow /
                     // submit_review_round block server-side up to ~10 min while the reviewer runs).
                     // The default 100s timeout would abort the POST, which the server sees as a
@@ -203,13 +202,12 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
                 // re-POSTing a retryable settlement 409 (flow_settlement_busy /
                 // reviewer_launch_incarnation_superseded) would violate exactly-one-v3-POST and churn
                 // reviewer launches. The coded 409 surfaces to the caller, who retries the whole start.
-                // It DOES keep the one-shot 401 token refresh (SendWithRefreshRetryAsync — which
-                // SendWithSettlementRetryAsync otherwise composes internally): a 401 is rejected at the
-                // auth layer BEFORE any run is created, so its single re-send is the only POST that
-                // reaches business logic — exactly-one-EFFECTIVE-v3-POST holds while a long-lived MCP
-                // process can still refresh a token that expired after startup. So a model start drops
-                // ONLY the settlement re-POST, not the refresh. Every v2 (no-model) start and every
-                // round keeps the full settlement retry (refresh included) unchanged.
+                // It DOES keep the lane's own 401 recovery: a 401 is rejected at the auth layer
+                // BEFORE any run is created, so its single re-send is the only POST that reaches
+                // business logic — exactly-one-EFFECTIVE-v3-POST holds while a long-lived MCP process
+                // can still recover a token that expired after startup. So a model start drops ONLY
+                // the settlement re-POST. Every v2 (no-model) start and every round keeps the full
+                // settlement retry unchanged.
                 var wasModelStart = !wasDynamicStart
                     && toolName is "start_review_flow" or "start_flow"
                     && !string.IsNullOrWhiteSpace(arguments?["model"]?.GetValue<string>());
@@ -222,10 +220,10 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
 
                 var sendResult = toolName switch {
                     "start_review_flow"   => wasModelStart
-                        ? new SettlementSendResult.Response(await SendWithRefreshRetryAsync(client, apiRoot, (c, ct) => StartFlowAsync(c, apiRoot, arguments, cwd, repoRoot, repoInfo, kindArgName: "kind", requestingSessionId: requestingSessionId, ct: ct)))
+                        ? new SettlementSendResult.Response(await StartFlowAsync(client, apiRoot, arguments, cwd, repoRoot, repoInfo, kindArgName: "kind", requestingSessionId: requestingSessionId))
                         : await SendWithSettlementRetryAsync(client, apiRoot, (c, ct) => StartFlowAsync(c, apiRoot, arguments, cwd, repoRoot, repoInfo, kindArgName: "kind", requestingSessionId: requestingSessionId, ct: ct), clock, backoff),
                     "start_flow"          => wasModelStart
-                        ? new SettlementSendResult.Response(await SendWithRefreshRetryAsync(client, apiRoot, (c, ct) => StartFlowAsync(c, apiRoot, arguments, cwd, repoRoot, repoInfo, kindArgName: "definition_id", requestingSessionId: requestingSessionId, ct: ct)))
+                        ? new SettlementSendResult.Response(await StartFlowAsync(client, apiRoot, arguments, cwd, repoRoot, repoInfo, kindArgName: "definition_id", requestingSessionId: requestingSessionId))
                         : await SendWithSettlementRetryAsync(client, apiRoot, (c, ct) => StartFlowAsync(c, apiRoot, arguments, cwd, repoRoot, repoInfo, kindArgName: "definition_id", requestingSessionId: requestingSessionId, ct: ct), clock, backoff),
                     // Round submission also retries the coded participant_unreachable 409 (see
                     // ParticipantUnreachableCode) — never a start, which can't return it.
@@ -246,7 +244,7 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
                 var postBody = await postResponse.Content.ReadAsStringAsync();
 
                 if (postResponse.StatusCode == HttpStatusCode.Unauthorized)
-                    return BuildToolResult(id, await AuthRejectionNotice.ForPersistentUnauthorizedAsync(config, profiles.Name, apiRoot), isError: true);
+                    return BuildToolResult(id, await AuthRejectionNotice.ForPersistentUnauthorizedAsync(store, profiles.Name, apiRoot), isError: true);
 
                 // Catalog-start protocol-v2 skew seam (404 means an old server, before any run
                 // started) plus an explicit-vendor echo check once the route matched.
@@ -338,7 +336,7 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
                     // send already had its go) is an auth problem, not a vendor one — say so, rather
                     // than printing a raw HTTP 401 the caller would read as a flow rejection.
                     if (retryResponse.StatusCode == HttpStatusCode.Unauthorized)
-                        return BuildToolResult(id, await AuthRejectionNotice.ForPersistentUnauthorizedAsync(config, profiles.Name, apiRoot), isError: true);
+                        return BuildToolResult(id, await AuthRejectionNotice.ForPersistentUnauthorizedAsync(store, profiles.Name, apiRoot), isError: true);
 
                     if (CheckVendorOverrideResult(toolName, preference, retryResponse.StatusCode, retryResponse.IsSuccessStatusCode, retryBody, out var retryRunIdToClose) is { } retryVendorCheck) {
                         if (retryRunIdToClose is not null)
@@ -407,11 +405,10 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
                         ReviewerVendorLookup.Aggregate(null, repoRoot, machineId, driverVendor, repoIdentity: repoIdentity),
                         McpJsonContext.Default.ReviewerVendorsResult));
 
-                using var daemonsResp = await SendWithRefreshRetryAsync(
-                    client, apiRoot, (c, ct) => c.GetAsync(apiRoot + "/api/daemons", ct));
+                using var daemonsResp = await client.GetAsync(apiRoot + "/api/daemons");
 
                 if (daemonsResp.StatusCode == HttpStatusCode.Unauthorized)
-                    return BuildToolResult(id, await AuthRejectionNotice.ForPersistentUnauthorizedAsync(config, profiles.Name, apiRoot), isError: true);
+                    return BuildToolResult(id, await AuthRejectionNotice.ForPersistentUnauthorizedAsync(store, profiles.Name, apiRoot), isError: true);
 
                 ReviewerVendorsResult result;
                 if (!daemonsResp.IsSuccessStatusCode) {
@@ -428,15 +425,15 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
             }
 
             using var httpResponse = toolName switch {
-                "get_review_flow_status" or "get_flow_status" => await SendWithRefreshRetryAsync(client, apiRoot, (c, ct) => c.GetAsync(BuildFlowUrl(apiRoot, arguments), ct)),
-                "close_review_flow"      or "close_flow"      => await SendWithRefreshRetryAsync(client, apiRoot, (c, ct) => c.PostAsync(BuildFlowUrl(apiRoot, arguments) + "/close", null, ct)),
+                "get_review_flow_status" or "get_flow_status" => await client.GetAsync(BuildFlowUrl(apiRoot, arguments)),
+                "close_review_flow"      or "close_flow"      => await client.PostAsync(BuildFlowUrl(apiRoot, arguments) + "/close", null),
                 _                                             => throw new ArgumentException($"Unknown tool: {toolName}")
             };
 
             var body = await httpResponse.Content.ReadAsStringAsync();
 
             if (httpResponse.StatusCode == HttpStatusCode.Unauthorized) {
-                return BuildToolResult(id, await AuthRejectionNotice.ForPersistentUnauthorizedAsync(config, profiles.Name, apiRoot), isError: true);
+                return BuildToolResult(id, await AuthRejectionNotice.ForPersistentUnauthorizedAsync(store, profiles.Name, apiRoot), isError: true);
             }
 
             if (!httpResponse.IsSuccessStatusCode) {
@@ -469,48 +466,6 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
         } catch (HttpRequestException ex) {
             return BuildToolResult(id, $"Error: {ex.Message}", isError: true);
         }
-    }
-
-    /// <summary>
-    /// Sends an HTTP request with one-shot retry on 401. The MCP server reuses a single
-    /// <see cref="HttpClient"/> for the lifetime of the agent session, so a cached token
-    /// that was valid at startup may have expired by the time a tool call is made. On 401
-    /// we ask <see cref="TokenStore.GetValidTokensForProfileAsync"/> for a fresh token (which triggers
-    /// the refresh flow for WorkOS / GitHubApp), update the client's <c>Authorization</c>
-    /// header, and retry the same request once. If refresh fails (genuinely not logged in
-    /// or refresh-token expired), the original 401 is returned and the caller surfaces the
-    /// store-aware <see cref="AuthRejectionNotice"/> line (which keeps the legacy
-    /// "Not logged in" wording only for a genuinely missing login).
-    /// </summary>
-    async Task<HttpResponseMessage> SendWithRefreshRetryAsync(
-            HttpClient client, string baseUrl, Func<HttpClient, CancellationToken, Task<HttpResponseMessage>> send,
-            CancellationToken ct = default
-        ) {
-        var response = await send(client, ct);
-
-        if (response.StatusCode != HttpStatusCode.Unauthorized) return response;
-
-        // Force a refresh against the token this client actually sent: the 401 proves the server
-        // rejected it even though it may still look unexpired locally, which a plain load would
-        // not heal. Passing the rejected token also means a peer process that already refreshed is
-        // adopted rather than rotated a second time. With no token attached at all — this MCP
-        // process outlives a `kcap login` that finished after the client was built — there is
-        // nothing to refresh, so just pick up whatever is stored now.
-        var rejected = client.DefaultRequestHeaders.Authorization?.Parameter;
-
-        // A failed rotation must not be worse than no rotation: fall back to whatever is stored so
-        // the pre-existing "re-read and resend once" recovery still happens.
-        var tokens    = new TokenStore(config);
-        var refreshed = rejected is null
-            ? (await tokens.GetValidTokensForServerAsync(profiles.Name, baseUrl, ct)).Tokens
-            : await tokens.RecoverForServerAsync(profiles.Name, baseUrl, rejected, ct);
-
-        if (refreshed is null) return response; // genuinely not logged in; keep the original 401
-
-        response.Dispose();
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", refreshed.AccessToken);
-
-        return await send(client, ct);
     }
 
     /// <summary>
@@ -658,9 +613,8 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
     /// loop has none), and caller-token cancellation is rethrown untouched — only this helper's OWN
     /// deadline firing produces <c>DeadlineExhausted</c>.</para>
     ///
-    /// <para>Wraps (doesn't replace) <see cref="SendWithRefreshRetryAsync"/>, so the 401 refresh
-    /// retry still applies on every attempt. All timing is injectable so unit tests run instantly on
-    /// a virtual clock.</para>
+    /// <para>Sits above the lane's own 401 recovery, which still applies on every attempt. All
+    /// timing is injectable so unit tests run instantly on a virtual clock.</para>
     ///
     /// <para><paramref name="budgetStartedAt"/> lets a caller that sends TWICE within one tool call
     /// (the preference fallback: a refused vendor-less start, then one re-send naming the saved
@@ -671,7 +625,7 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
     /// already given up, and the driver starts the flow again. Omitted, the budget starts now, which
     /// is every other caller's behavior unchanged.</para>
     /// </summary>
-    internal async Task<SettlementSendResult> SendWithSettlementRetryAsync(
+    internal static async Task<SettlementSendResult> SendWithSettlementRetryAsync(
             HttpClient                                                    client,
             string                                                        apiRoot,
             Func<HttpClient, CancellationToken, Task<HttpResponseMessage>> send,
@@ -711,7 +665,7 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
 
             HttpResponseMessage response;
             try {
-                response = await SendWithRefreshRetryAsync(client, apiRoot, send, scope.Token);
+                response = await send(client, scope.Token);
             } catch (OperationCanceledException) when (scope.DeadlineFired && !callerToken.IsCancellationRequested) {
                 // OUR deadline cut an in-flight attempt short — that is an exhausted budget, not a
                 // failure to report. Caller cancellation deliberately falls through and rethrows.
@@ -1433,7 +1387,7 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
         // Fix #3: anchor the 404 grace window to poll start, not to first-seen-404.
         var notFoundGraceDeadline = pollStartedAt + NotFoundGrace;
         var consecutiveTransient  = 0;
-        var lastTransientError    = (string?)null;
+        string? lastTransientError;
         // Retry ordinal for the two settlement-layer coded 409s, feeding the shared jittered backoff
         // schedule — distinct from the network/5xx transient budget above, which uses the full 3s
         // PollInterval. Reset on any successful GET, so a late busy starts the schedule over.
@@ -1443,7 +1397,7 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
             using var getCts = clock.CreateTimeoutSource(PerGetTimeout);
             HttpResponseMessage resp;
             try {
-                resp = await SendWithRefreshRetryAsync(client, apiRoot, (c, ct) => c.GetAsync(url, ct), getCts.Token);
+                resp = await client.GetAsync(url, getCts.Token);
             } catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException) {
                 // Fix #4: count network/TLS/timeout as transient; stop after budget.
                 consecutiveTransient++;
@@ -1462,7 +1416,7 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
                 }
 
                 if (resp.StatusCode == HttpStatusCode.Unauthorized)
-                    return new(await AuthRejectionNotice.ForPersistentUnauthorizedAsync(config, profiles.Name, apiRoot), true);
+                    return new(await AuthRejectionNotice.ForPersistentUnauthorizedAsync(store, profiles.Name, apiRoot), true);
 
                 // Fix #4: non-transient 4xx (e.g. 400, 403, 409 budget_unverifiable) fail
                 // immediately — coded bodies surface via FormatFlowStartError like the POST path.
@@ -1554,14 +1508,14 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
         var pollStartedAt         = clock.UtcNow;
         var deadline              = pollStartedAt + PollCap;
         var consecutiveTransient  = 0;
-        var lastTransientError    = (string?)null;
+        string? lastTransientError;
         var settlementRetriesUsed = 0;
 
         while (clock.UtcNow < deadline) {
             using var getCts = clock.CreateTimeoutSource(PerGetTimeout);
             HttpResponseMessage resp;
             try {
-                resp = await SendWithRefreshRetryAsync(client, apiRoot, (c, ct) => c.GetAsync(url, ct), getCts.Token);
+                resp = await client.GetAsync(url, getCts.Token);
             } catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException) {
                 consecutiveTransient++;
                 lastTransientError = ex.Message;
@@ -1572,7 +1526,7 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
 
             using (resp) {
                 if (resp.StatusCode == HttpStatusCode.Unauthorized)
-                    return new(await AuthRejectionNotice.ForPersistentUnauthorizedAsync(config, profiles.Name, apiRoot), true);
+                    return new(await AuthRejectionNotice.ForPersistentUnauthorizedAsync(store, profiles.Name, apiRoot), true);
 
                 var statusCode = (int)resp.StatusCode;
                 if (statusCode is >= 400 and < 500) {
@@ -2004,7 +1958,7 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
     /// failure (non-2xx or exception), then swallows and logs to stderr — the next status/round/
     /// close call will see the same messages still pending and re-render + re-ack them, so a lost
     /// ack only delays cleanup, it never drops a message.</summary>
-    internal async Task AckRenderedMessagesAsync(
+    internal static async Task AckRenderedMessagesAsync(
             HttpClient            client,
             string                apiRoot,
             string                flowRunId,
@@ -2024,12 +1978,8 @@ class McpFlowsServer(ConfigRoot config, ProfileContext profiles) {
                 // driver is waiting on. A timeout surfaces as OperationCanceledException, which
                 // falls into the existing swallow-and-retry-once path below.
                 using var postCts = clock.CreateTimeoutSource(PerAckPostTimeout);
-                using var response = await SendWithRefreshRetryAsync(
-                    client,
-                    apiRoot,
-                    (c, ct) => c.PostAsync(url, JsonContent.Create(body, McpJsonContext.Default.AckFlowMessagesDto), ct),
-                    postCts.Token
-                );
+                using var response = await client.PostAsync(
+                    url, JsonContent.Create(body, McpJsonContext.Default.AckFlowMessagesDto), postCts.Token);
                 return response.IsSuccessStatusCode;
             } catch {
                 return false;

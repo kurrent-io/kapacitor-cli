@@ -16,9 +16,8 @@ namespace Capacitor.Cli.SessionStartMemory;
 /// invoking this lane always means "guidelines are enabled for this session".</para>
 /// </summary>
 internal sealed class SessionStartGuidelinesLane(
-    Func<string?, CancellationToken, Task<HttpClient>> clientFactory,
-    Action<string>? diagnostic = null,
-    bool disposeClients = false) {
+    Func<CancellationToken, Task<HttpClient>> client,
+    Action<string>? diagnostic = null) {
 
     /// <summary>
     /// Fetches and renders the guidelines fragment for an already-resolved
@@ -31,7 +30,7 @@ internal sealed class SessionStartGuidelinesLane(
         if (scope.RepoHash is null) return SessionStartMemoryContextResult.Empty;
 
         var outcome = await SessionStartContextFetch.FetchAsync(
-            clientFactory, BuildUrl(request.BaseUrl, scope.RepoHash), disposeClients, ct);
+            await client(ct), BuildUrl(request.BaseUrl, scope.RepoHash), ct);
 
         if (outcome.Status == HttpStatusCode.NoContent) return SessionStartMemoryContextResult.Empty;
         if (outcome.Status == HttpStatusCode.BadRequest) {

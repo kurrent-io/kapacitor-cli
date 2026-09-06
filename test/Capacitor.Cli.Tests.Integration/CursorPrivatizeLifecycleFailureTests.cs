@@ -101,7 +101,7 @@ public class CursorPrivatizeLifecycleFailureTests : IDisposable {
 
         var source = new CursorImportSource(Config.Root, WriteOneCursorSession(), WorkspaceStorageDir);
 
-        var exitCode = await new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home).HandleImport(
+        var exitCode = await new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home, new FixedCapacitorHttpClient()).HandleImport(
             filterCwd: null,
             minLines: 0,
             sources: [source],
@@ -140,7 +140,7 @@ public class CursorPrivatizeLifecycleFailureTests : IDisposable {
 
         var source = new CursorImportSource(Config.Root, WriteOneCursorSession(), WorkspaceStorageDir);
 
-        var exitCode = await new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home).HandleImport(
+        var exitCode = await new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home, new FixedCapacitorHttpClient()).HandleImport(
             filterCwd: null,
             minLines: 0,
             sources: [source],
@@ -176,7 +176,7 @@ public class CursorPrivatizeLifecycleFailureTests : IDisposable {
 
         var source = new CursorImportSource(Config.Root, WriteOneCursorSession(), WorkspaceStorageDir);
 
-        var exitCode = await new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home).HandleImport(
+        var exitCode = await new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home, new FixedCapacitorHttpClient()).HandleImport(
             filterCwd: null,
             minLines: 0,
             sources: [source],
@@ -267,7 +267,7 @@ public class CursorPrivatizeLifecycleFailureTests : IDisposable {
 
         var source = new CursorImportSource(Config.Root, WriteParentWithCorrelatedChild(), WorkspaceStorageDir);
 
-        var exitCode = await new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home).HandleImport(
+        var exitCode = await new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home, new FixedCapacitorHttpClient()).HandleImport(
             filterCwd: null,
             minLines: 0,
             sources: [source],

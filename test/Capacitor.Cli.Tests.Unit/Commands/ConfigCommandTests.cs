@@ -229,13 +229,13 @@ public class ConfigCommandTests {
         Directory.CreateDirectory(tmp.Path);
         await File.WriteAllTextAsync(AppConfig.GetConfigPath(root), """{"active_profile":"","profiles":{}}""");
 
-        await new ConfigCommand(root).HandleAsync(["config", "set", "skills.auto_sync", "true"]);
+        await new ConfigCommand(root, new FixedCapacitorHttpClient()).HandleAsync(["config", "set", "skills.auto_sync", "true"]);
 
         var cfg = await AppConfig.LoadProfileConfig(root);
         await Assert.That(cfg.Profiles.ContainsKey("")).IsFalse();
         await Assert.That(cfg.Profiles["default"].Skills!.AutoSync!.Value).IsTrue();
 
-        await new ConfigCommand(root).HandleAsync(["config", "unset", "skills.auto_sync"]);
+        await new ConfigCommand(root, new FixedCapacitorHttpClient()).HandleAsync(["config", "unset", "skills.auto_sync"]);
         var after = await AppConfig.LoadProfileConfig(root);
         await Assert.That(after.Profiles["default"].Skills!.AutoSync).IsNull();
     }

@@ -1,5 +1,6 @@
 using System.Text;
 using Capacitor.Cli.Commands;
+using Capacitor.Cli.Core.Http;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
 using WireMock.Server;
@@ -12,16 +13,25 @@ namespace Capacitor.Cli.Tests.Unit.Commands;
 /// work rows and "what's done" summaries. A 404 on the artifacts route (old server / non-visible
 /// session) falls back to the original recap-only rendering unchanged.
 ///
+/// <para><c>HandleCore</c> is driven with a <see cref="SessionsApi"/> built against a
+/// <see cref="FixedCapacitorHttpClient"/> pointed at the WireMock stub — no auth-discovery
+/// pipeline, mirroring <c>FeedbackCommandTests</c>'s <c>HandleCore</c> seam.</para>
+///
 /// Every test is <c>[NotInParallel]</c> with NO group key (globally sequential), mirroring
 /// <c>ClaudeHookStdoutTests</c>: the SUT writes to the process-global <see cref="Console.Out"/>,
 /// and a group key alone would not stop a different file's test from leaking into the capture.
 /// </summary>
 public class ValidatePlanCommandTests : IDisposable {
+    [TempConfigRoot] public required TempConfigRoot Config { get; init; }
+
     const string SessionId = "9dc2775376454e4691ecc2d69973c152";
 
     readonly WireMockServer _server = WireMockServer.Start();
 
     public void Dispose() => _server.Stop();
+
+    ISessionsApi Api() =>
+        new SessionsApi(new FixedCapacitorHttpClient(), new CapacitorServer(_server.Url!, Config.Root, Resolutions.At(_server.Url!, Config.Root)));
 
     static async Task<string> CaptureStdoutAsync(Func<Task> action) {
         using var capture = ConsoleOutput.StartCapture();
@@ -67,9 +77,8 @@ public class ValidatePlanCommandTests : IDisposable {
         _server.Given(Request.Create().WithPath($"/api/sessions/{SessionId}/recap").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(200).WithHeader("Content-Type", "application/json").WithBody(RecapJson()));
 
-        using var client = new HttpClient();
         var exitCode = -1;
-        var stdout = await CaptureStdoutAsync(async () => exitCode = await ValidatePlanCommand.HandleCore(client, _server.Url!, SessionId));
+        var stdout = await CaptureStdoutAsync(async () => exitCode = await ValidatePlanCommand.HandleCore(Api(), SessionId));
 
         await Assert.That(stdout).Contains("## Plan");
         await Assert.That(stdout).Contains("Step 1\nStep 2");
@@ -89,9 +98,8 @@ public class ValidatePlanCommandTests : IDisposable {
                 { "primary": null, "artifacts": [], "diagnostics": [] }
                 """));
 
-        using var client = new HttpClient();
         var exitCode = -1;
-        var stdout = await CaptureStdoutAsync(async () => exitCode = await ValidatePlanCommand.HandleCore(client, _server.Url!, SessionId));
+        var stdout = await CaptureStdoutAsync(async () => exitCode = await ValidatePlanCommand.HandleCore(Api(), SessionId));
 
         await Assert.That(stdout.Trim()).IsEqualTo("No plan found for this session.");
         await Assert.That(exitCode).IsEqualTo(0); // absence of a plan is a valid answer
@@ -110,8 +118,7 @@ public class ValidatePlanCommandTests : IDisposable {
         _server.Given(Request.Create().WithPath($"/api/sessions/{SessionId}/recap").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(200).WithHeader("Content-Type", "application/json").WithBody(RecapJson(extra)));
 
-        using var client = new HttpClient();
-        var stdout = await CaptureStdoutAsync(() => ValidatePlanCommand.HandleCore(client, _server.Url!, SessionId));
+        var stdout = await CaptureStdoutAsync(() => ValidatePlanCommand.HandleCore(Api(), SessionId));
 
         await Assert.That(stdout).Contains("## Plan");
         await Assert.That(stdout).Contains("Legacy plan text");
@@ -135,8 +142,7 @@ public class ValidatePlanCommandTests : IDisposable {
         _server.Given(Request.Create().WithPath($"/api/sessions/{SessionId}/recap").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(200).WithHeader("Content-Type", "application/json").WithBody(RecapJson()));
 
-        using var client = new HttpClient();
-        var stdout = await CaptureStdoutAsync(() => ValidatePlanCommand.HandleCore(client, _server.Url!, SessionId));
+        var stdout = await CaptureStdoutAsync(() => ValidatePlanCommand.HandleCore(Api(), SessionId));
 
         await Assert.That(stdout.Trim()).IsEqualTo("No plan found for this session.");
     }
@@ -176,8 +182,7 @@ public class ValidatePlanCommandTests : IDisposable {
         _server.Given(Request.Create().WithPath($"/api/sessions/{SessionId}/recap").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(200).WithHeader("Content-Type", "application/json").WithBody(RecapJson()));
 
-        using var client = new HttpClient();
-        var stdout = await CaptureStdoutAsync(() => ValidatePlanCommand.HandleCore(client, _server.Url!, SessionId));
+        var stdout = await CaptureStdoutAsync(() => ValidatePlanCommand.HandleCore(Api(), SessionId));
 
         await Assert.That(stdout).Contains($"[plan truncated: first {byteCount} of 5000 bytes]");
         await Assert.That(stdout).Contains(content);
@@ -215,9 +220,8 @@ public class ValidatePlanCommandTests : IDisposable {
         _server.Given(Request.Create().WithPath($"/api/sessions/{SessionId}/recap").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(200).WithHeader("Content-Type", "application/json").WithBody(RecapJson()));
 
-        using var client = new HttpClient();
         var exitCode = -1;
-        var stdout = await CaptureStdoutAsync(async () => exitCode = await ValidatePlanCommand.HandleCore(client, _server.Url!, SessionId));
+        var stdout = await CaptureStdoutAsync(async () => exitCode = await ValidatePlanCommand.HandleCore(Api(), SessionId));
 
         await Assert.That(stdout).Contains("[plan content unavailable due to size bounds]");
         await Assert.That(stdout).Contains("Validation is not possible");
@@ -262,9 +266,8 @@ public class ValidatePlanCommandTests : IDisposable {
         _server.Given(Request.Create().WithPath($"/api/sessions/{SessionId}/recap").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(200).WithHeader("Content-Type", "application/json").WithBody(RecapJson()));
 
-        using var client = new HttpClient();
         var exitCode = -1;
-        var stdout = await CaptureStdoutAsync(async () => exitCode = await ValidatePlanCommand.HandleCore(client, _server.Url!, SessionId));
+        var stdout = await CaptureStdoutAsync(async () => exitCode = await ValidatePlanCommand.HandleCore(Api(), SessionId));
 
         var byteCount = Encoding.UTF8.GetByteCount(content);
         await Assert.That(stdout).Contains($"[plan truncated: first {byteCount} of ? bytes]");
@@ -309,9 +312,8 @@ public class ValidatePlanCommandTests : IDisposable {
         _server.Given(Request.Create().WithPath($"/api/sessions/{SessionId}/recap").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(200).WithHeader("Content-Type", "application/json").WithBody(RecapJson()));
 
-        using var client = new HttpClient();
         var exitCode = -1;
-        var stdout = await CaptureStdoutAsync(async () => exitCode = await ValidatePlanCommand.HandleCore(client, _server.Url!, SessionId));
+        var stdout = await CaptureStdoutAsync(async () => exitCode = await ValidatePlanCommand.HandleCore(Api(), SessionId));
 
         await Assert.That(stdout).DoesNotContain("first 0");
         await Assert.That(stdout).Contains("[plan content unavailable due to size bounds]");
@@ -354,8 +356,7 @@ public class ValidatePlanCommandTests : IDisposable {
         _server.Given(Request.Create().WithPath($"/api/sessions/{SessionId}/recap").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(200).WithHeader("Content-Type", "application/json").WithBody(RecapJson()));
 
-        using var client = new HttpClient();
-        var stdout = await CaptureStdoutAsync(() => ValidatePlanCommand.HandleCore(client, _server.Url!, SessionId));
+        var stdout = await CaptureStdoutAsync(() => ValidatePlanCommand.HandleCore(Api(), SessionId));
 
         await Assert.That(stdout).Contains("[plan state: unresolved newer revision — last known complete text]");
         await Assert.That(stdout).Contains("Step 1\nStep 2");
@@ -403,8 +404,7 @@ public class ValidatePlanCommandTests : IDisposable {
         _server.Given(Request.Create().WithPath($"/api/sessions/{SessionId}/recap").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(200).WithHeader("Content-Type", "application/json").WithBody(RecapJson()));
 
-        using var client = new HttpClient();
-        var stdout = await CaptureStdoutAsync(() => ValidatePlanCommand.HandleCore(client, _server.Url!, SessionId));
+        var stdout = await CaptureStdoutAsync(() => ValidatePlanCommand.HandleCore(Api(), SessionId));
 
         var degradedIndex  = stdout.IndexOf("[plan state: unresolved newer revision", StringComparison.Ordinal);
         var truncatedIndex = stdout.IndexOf($"[plan truncated: first {byteCount} of 5000 bytes]", StringComparison.Ordinal);
@@ -505,8 +505,7 @@ public class ValidatePlanCommandTests : IDisposable {
         _server.Given(Request.Create().WithPath($"/api/sessions/{SessionId}/recap").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(200).WithHeader("Content-Type", "application/json").WithBody(RecapJson()));
 
-        using var client = new HttpClient();
-        var stdout = await CaptureStdoutAsync(() => ValidatePlanCommand.HandleCore(client, _server.Url!, SessionId));
+        var stdout = await CaptureStdoutAsync(() => ValidatePlanCommand.HandleCore(Api(), SessionId));
 
         var primaryIndex = stdout.IndexOf("PRIMARY-CONTENT", StringComparison.Ordinal);
         var other1Index  = stdout.IndexOf("OTHER-ONE-CONTENT", StringComparison.Ordinal);

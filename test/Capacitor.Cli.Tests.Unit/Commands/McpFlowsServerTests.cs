@@ -1,7 +1,6 @@
 using System.Net;
 using System.Text.Json.Nodes;
 using Capacitor.Cli.Commands;
-using Capacitor.Cli.Core.Auth;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
 using WireMock.Server;
@@ -11,10 +10,10 @@ namespace Capacitor.Cli.Tests.Unit.Commands;
 public class McpFlowsServerTests {
     [TempConfigRoot] public required TempConfigRoot Config { get; init; }
 
-    // The dispatch is profile-scoped: its token refresh resolves a profile. These tests exercise
-    // routing, not profile selection.
+    // Resolutions.None: these tests exercise routing, not profile selection.
     McpFlowsServer Server() =>
-        new(Config.Root, Resolutions.None(Config.Root));
+        new(Config.Root, Resolutions.None(Config.Root), AuthFixtures.NewTokenStore(Config.Root),
+            new FixedCapacitorHttpClient());
 
     // The ack retry's 2s wait now runs on the injected clock, so these tests stay instant while
     // still asserting the real schedule (VirtualFlowRetryClock.Delays records every requested wait).
@@ -341,7 +340,7 @@ public class McpFlowsServerTests {
               .RespondWith(Response.Create().WithStatusCode(200));
         using var client = new HttpClient();
 
-        await Server().AckRenderedMessagesAsync(client, server.Url!, "f1", ["m1", "m2"], Clock());
+        await McpFlowsServer.AckRenderedMessagesAsync(client, server.Url!, "f1", ["m1", "m2"], Clock());
 
         await Assert.That(server.LogEntries.Count).IsEqualTo(1);
         var body = server.LogEntries.Single().RequestMessage.Body!;
@@ -359,7 +358,7 @@ public class McpFlowsServerTests {
         using var client = new HttpClient();
 
         var clock = Clock();
-        await Server().AckRenderedMessagesAsync(client, server.Url!, "f1", ["m1"], clock);
+        await McpFlowsServer.AckRenderedMessagesAsync(client, server.Url!, "f1", ["m1"], clock);
         var delays = clock.Delays;
 
         await Assert.That(server.LogEntries.Count).IsEqualTo(2);
@@ -382,7 +381,7 @@ public class McpFlowsServerTests {
         using var client = new HttpClient { Timeout = TimeSpan.FromMilliseconds(50) };
 
         var clock = Clock();
-        await Server().AckRenderedMessagesAsync(client, server.Url!, "f1", ["m1"], clock);
+        await McpFlowsServer.AckRenderedMessagesAsync(client, server.Url!, "f1", ["m1"], clock);
         var delays = clock.Delays;
 
         // No exception propagated, and the retry-after-delay path still ran once — i.e. both the
@@ -395,7 +394,7 @@ public class McpFlowsServerTests {
         using var server = WireMockServer.Start();
         using var client = new HttpClient();
 
-        await Server().AckRenderedMessagesAsync(client, server.Url!, "f1", [], Clock());
+        await McpFlowsServer.AckRenderedMessagesAsync(client, server.Url!, "f1", [], Clock());
 
         await Assert.That(server.LogEntries.Count).IsEqualTo(0);
     }
@@ -427,7 +426,7 @@ public class McpFlowsServerTests {
               .RespondWith(Response.Create().WithStatusCode(200));
         using var client = new HttpClient();
 
-        await Server().AckRenderedMessagesAsync(client, server.Url!, "f1", pendingIds, Clock());
+        await McpFlowsServer.AckRenderedMessagesAsync(client, server.Url!, "f1", pendingIds, Clock());
 
         await Assert.That(server.LogEntries.Count).IsEqualTo(1);
         var ackBody = server.LogEntries.Single().RequestMessage.Body!;
@@ -821,54 +820,6 @@ public class McpFlowsServerTests {
         // EXACTLY ONE POST to v4 — a model-bearing start is never settlement-retried.
         await Assert.That(server.LogEntries.Count(
             e => e.RequestMessage.Path == "/api/flows/review/start/v4")).IsEqualTo(1);
-    }
-
-    // Round-2 regression guard: dropping the settlement re-POST for a v3 model start must NOT also
-    // drop the one-shot 401 token refresh. Seeds a non-expired token so TokenStore.GetValidTokensAsync
-    // returns it, then stubs v3 to 401-then-200 so the refreshed re-send is observable.
-    const string FreshBearer = "refreshed-bearer-xyz";
-
-    async Task SeedDefaultTokenAsync() =>
-        await new TokenStore(Config.Root).SaveAsync("default", new StoredTokens {
-            AccessToken    = FreshBearer,
-            ExpiresAt      = DateTimeOffset.UtcNow.AddHours(1), // not expired → returned as-is (no real refresh endpoint needed)
-            GitHubUsername = "seed",
-            Provider       = AuthProvider.GitHubApp
-        });
-
-    [Test]
-    public async Task HandleToolCall_with_model_401_refreshes_token_and_resends_v4_exactly_once() {
-        // A model-bearing start keeps the one-shot 401 token refresh (SendWithRefreshRetryAsync, which
-        // wraps the whole StartFlowAsync including the B3 /v4 attempt): in a long-lived flows MCP
-        // process the cached token can expire after startup, and on 401 the client re-reads a fresh
-        // token and re-sends the SAME /v4 POST once. The 401 is rejected at the auth layer BEFORE any
-        // run is created, so the re-send is the only POST that reaches business logic —
-        // exactly-one-EFFECTIVE-POST still holds. (A 401 is not a 404, so /v4 never falls back to /v3.)
-        await SeedDefaultTokenAsync();
-        using var server = WireMockServer.Start();
-        server.Given(Request.Create().WithPath("/api/flows/review/start/v4").UsingPost())
-            .InScenario("model-401").WillSetStateTo("after-401")
-            .RespondWith(Response.Create().WithStatusCode(401).WithBody(""));
-        server.Given(Request.Create().WithPath("/api/flows/review/start/v4").UsingPost())
-            .InScenario("model-401").WhenStateIs("after-401")
-            .RespondWith(Response.Create().WithStatusCode(200).WithBody(V3RunningWithAck));
-        using var client = new HttpClient();
-
-        var response = await Server().HandleToolCallAsync(
-            JsonNode.Parse("1")!, ModelToolCall("start_review_flow", ModelStartArguments("claude", "opus")),
-            client, server.Url!, cwd: "/tmp/cwd", repoRoot: null, repoInfo: null);
-
-        var result = JsonNode.Parse(response)!.AsObject();
-        // The refreshed 2nd send succeeded — NOT surfaced as the friendly "Not logged in".
-        await Assert.That(result["result"]!["isError"]).IsNull();
-
-        // Exactly two v4 POSTs (the original 401 + one refreshed re-send).
-        await Assert.That(server.FindLogEntries(
-            Request.Create().WithPath("/api/flows/review/start/v4").UsingPost()).Count).IsEqualTo(2);
-        // Only the 2nd carries the refreshed bearer (the first client had no auth header).
-        await Assert.That(server.FindLogEntries(
-            Request.Create().WithPath("/api/flows/review/start/v4")
-                .WithHeader("Authorization", $"Bearer {FreshBearer}").UsingPost()).Count).IsEqualTo(1);
     }
 
     [Test]

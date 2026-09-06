@@ -1,11 +1,11 @@
 using System.Diagnostics;
-using Capacitor.Cli.Core;
 using Capacitor.Cli.Core.Config;
 using Capacitor.Cli.Core.Commands;
+using Capacitor.Cli.Core.Http;
 
 namespace Capacitor.Cli.Commands;
 
-class ReviewCommand(ConfigRoot config, ProfileContext profiles) {
+class ReviewCommand(ProfileContext profiles, IReviewApi review) {
     public async Task<int> HandleReview(string prIdentifier) {
         var baseUrl = profiles.Resolution.ServerUrl!;
 
@@ -22,29 +22,19 @@ class ReviewCommand(ConfigRoot config, ProfileContext profiles) {
 
         await Console.Error.WriteLineAsync($"Reviewing PR #{prNumber} in {owner}/{repo}...");
 
-        // Verify that review context exists on the server
-        using var client = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
-
+        // Launching is only worth it once the server actually holds context for this PR.
         try {
-            var response = await client.GetAsync(
-                $"{baseUrl}/api/review/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repo)}/pulls/{prNumber}");
-
-            if (!response.IsSuccessStatusCode) {
-                var status = (int)response.StatusCode;
-
-                if (status == 404) {
-                    await Console.Error.WriteLineAsync($"No review context found for {owner}/{repo}#{prNumber}.");
-                    await Console.Error.WriteLineAsync("Make sure the PR has sessions tracked in Capacitor.");
-                } else if (await HttpClientExtensions.HandleUnauthorizedAsync(response)) {
-                    // 401 message already printed
-                } else {
-                    await Console.Error.WriteLineAsync($"Server returned HTTP {status} when checking review context.");
-                }
+            if (await review.GetPullRequestContextAsync(owner, repo, prNumber) is ReviewContextResult.NotFound) {
+                await Console.Error.WriteLineAsync($"No review context found for {owner}/{repo}#{prNumber}.");
+                await Console.Error.WriteLineAsync("Make sure the PR has sessions tracked in Capacitor.");
 
                 return 1;
             }
-        } catch (HttpRequestException ex) {
-            HttpClientExtensions.WriteUnreachableError(baseUrl, ex);
+        } catch (CapacitorApiException ex) {
+            // An unreachable server and a 401 both phrase themselves; every other status needs saying
+            // what the CLI was doing when it got one.
+            await Console.Error.WriteLineAsync(
+                ex.Status is null or 401 ? ex.Message : $"Server returned HTTP {ex.Status} when checking review context.");
 
             return 1;
         }

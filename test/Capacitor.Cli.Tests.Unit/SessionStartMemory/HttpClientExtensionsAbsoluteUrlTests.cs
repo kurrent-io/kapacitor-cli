@@ -1,6 +1,4 @@
-using Capacitor.Cli.Commands.Harness;
 using Capacitor.Cli.Core;
-using Capacitor.Cli.SessionStartMemory;
 
 namespace Capacitor.Cli.Tests.Unit.SessionStartMemory;
 
@@ -54,25 +52,5 @@ public class HttpClientExtensionsAbsoluteUrlTests {
     [Arguments("https://kurrent.kcap.ai")]
     public async Task IsPostable_accepts_absolute_http(string url) {
         await Assert.That(HookHttp.IsPostable(url)).IsTrue();
-    }
-
-    /// <summary>
-    /// The two named guards that predate <see cref="HookHttp"/> must stay byte-identical to it.
-    /// They kept their names and their existing coverage but now delegate; this pins that they
-    /// cannot drift back apart.
-    /// </summary>
-    [Test]
-    [Arguments(null)]
-    [Arguments("   ")]
-    [Arguments("localhost:5108")]
-    [Arguments("/relative")]
-    [Arguments("ftp://host")]
-    [Arguments("http://localhost:5108")]
-    [Arguments("https://kurrent.kcap.ai")]
-    public async Task Delegating_predicates_agree_with_IsPostable(string? url) {
-        var expected = HookHttp.IsPostable(url);
-
-        await Assert.That(SessionStartMemoryHookSupport.CanAttempt(url)).IsEqualTo(expected);
-        await Assert.That(CodexHookCommand.CanAttemptMemoryInjection(url)).IsEqualTo(expected);
     }
 }

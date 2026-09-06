@@ -9,6 +9,7 @@ using Capacitor.Cli.Core;
 using Capacitor.Cli.Core.LocalIpc;
 using Capacitor.Cli.Core.Auth;
 using Capacitor.Cli.Core.Config;
+using Capacitor.Cli.Core.Http;
 using Capacitor.Cli.Core.Harness;
 using Capacitor.Cli.Core.Harness.Claude;
 using Capacitor.Cli.Core.Harness.Codex;
@@ -420,13 +421,10 @@ internal partial class AgentOrchestrator : IAsyncDisposable {
     /// <para>The daemon runs unsandboxed with the real HOME, so its token store resolves; the
     /// reviewer's does not. <paramref name="apiPath"/> comes from the bridge's own fixed route table,
     /// never from the request, so a sandboxed child cannot steer this at an arbitrary API path.</para>
-    ///
-    /// <para>The client is per-call, matching <see cref="EvalRunner"/>: a submission happens once per
-    /// round, and a cached client would pin a token across a rotation.</para>
     /// </summary>
     async Task<(int Status, string Body)> ForwardFlowSubmissionAsync(
             string apiPath, string body, CancellationToken ct) {
-        using var http = await HttpClientExtensions.CreateAuthenticatedClientAsync(_configRoot, _config.Profiles, _config.ServerUrl, ct);
+        using var http = await _http.ForBackgroundAsync(ct);
         using var content  = new StringContent(body, Encoding.UTF8, "application/json");
         using var response = await http.PostAsync(
             $"{_config.ServerUrl.TrimEnd('/')}{apiPath}", content, ct);
@@ -534,6 +532,8 @@ internal partial class AgentOrchestrator : IAsyncDisposable {
     readonly RepoMatcher                                       _repoMatcher;
     readonly IPtyProcessFactory                                _ptyFactory;
     readonly IHttpClientFactory                                _httpClientFactory;
+    readonly ICapacitorHttpClient                              _http;
+    readonly TokenStore                                        _tokens;
     readonly LocalPermissionBridge                             _permissionBridge;
     readonly PermissionPromptBroker                            _permissionBroker;
     readonly IReadOnlyDictionary<string, IHostedAgentLauncher> _launchers;
@@ -643,6 +643,8 @@ internal partial class AgentOrchestrator : IAsyncDisposable {
             RepoMatcher                                       repoMatcher,
             IPtyProcessFactory                                ptyFactory,
             IHttpClientFactory                                httpClientFactory,
+            ICapacitorHttpClient                              http,
+            TokenStore                                       tokens,
             LocalPermissionBridge                             permissionBridge,
             IReadOnlyDictionary<string, IHostedAgentLauncher> launchers,
             IReadOnlyDictionary<string, IHostedAgentRuntimeFactory> runtimeFactories,
@@ -670,12 +672,14 @@ internal partial class AgentOrchestrator : IAsyncDisposable {
         _config            = config;
         _configRoot        = configRoot;
         _home              = home;
+        _tokens            = tokens;
         _harnesses         = HarnessRegistry.FromEnvironment(home);
         _server            = server;
         _worktreeManager   = worktreeManager;
         _repoMatcher       = repoMatcher;
         _ptyFactory        = ptyFactory;
         _httpClientFactory = httpClientFactory;
+        _http              = http;
         _permissionBridge  = permissionBridge;
         _permissionBroker  = permissionBroker ?? new();
         _launchers         = launchers;
@@ -3924,7 +3928,7 @@ internal partial class AgentOrchestrator : IAsyncDisposable {
             try {
                 using var httpClient = _httpClientFactory.CreateClient("Attachments");
 
-                var resolution = await new TokenStore(_configRoot).GetValidTokensForServerAsync(_config.Profiles.Name, _config.ServerUrl);
+                var resolution = await _tokens.GetValidTokensForServerAsync(_config.Profiles.Name, _config.ServerUrl);
 
                 if (resolution.Tokens is not null) {
                     httpClient.DefaultRequestHeaders.Authorization = new("Bearer", resolution.Tokens.AccessToken);
@@ -4761,7 +4765,7 @@ internal partial class AgentOrchestrator : IAsyncDisposable {
     }
 
     async Task RunTokenRefreshLoopAsync(CancellationToken ct) {
-        var loop = new TokenRefreshLoop(new TokenStoreRefreshPort(_configRoot, _config.Profiles.Name, ProactiveRefreshWindow), _logger, ProactiveRefreshMinInterval);
+        var loop = new TokenRefreshLoop(new TokenStoreRefreshPort(_tokens, _config.Profiles.Name, ProactiveRefreshWindow), _logger, ProactiveRefreshMinInterval);
 
         while (await _tokenRefresh.WaitForNextTickAsync(ct)) {
             // Defence in depth: TickAsync is intentionally total, but this runs as an
@@ -4780,7 +4784,7 @@ internal partial class AgentOrchestrator : IAsyncDisposable {
     async Task RunSpoolDrainLoopAsync(CancellationToken ct) {
         var loop = new SpoolDrainLoop(
             _configRoot,
-            _config.Profiles,
+            _http,
             _config.ServerUrl,
             new HookSpool(_configRoot),
             new TranscriptSpool(_configRoot),
@@ -4805,7 +4809,7 @@ internal partial class AgentOrchestrator : IAsyncDisposable {
         var loop = new TitleResolveLoop(
             SnapshotAgentsForTitles,
             (agentId, title) => { if (_agents.TryGetValue(agentId, out var agent)) SetResolvedTitle(agent, title); },
-            new TitleServerPort(_configRoot, _config.Profiles, _config.ServerUrl),
+            new TitleServerPort(_http, _config.ServerUrl),
             NativeTitleFor,
             GenerateTitleForAsync,
             TimeProvider.System,

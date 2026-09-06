@@ -1,15 +1,14 @@
 using System.Text;
 using System.Text.Json;
 using Capacitor.Cli.Core;
-using Capacitor.Cli.Core.Config;
+using Capacitor.Cli.Core.Http;
 
 // ReSharper disable MethodHasAsyncOverload
 
 namespace Capacitor.Cli.Commands;
 
-class RecapCommand(ConfigRoot config, ProfileContext profiles) {
+class RecapCommand(ConfigRoot config, ISessionsApi sessionsApi, IRepositoriesApi repositoriesApi) {
     public async Task<int> HandleRepoRecap(int limit = 10) {
-        var baseUrl = profiles.Resolution.ServerUrl!;
         var cwd  = Directory.GetCurrentDirectory();
         var repo = await RepositoryDetection.DetectRepositoryAsync(config, cwd);
 
@@ -21,32 +20,17 @@ class RecapCommand(ConfigRoot config, ProfileContext profiles) {
 
         var hash = RepoHashHelper.ComputeRepoHash(repo.Owner, repo.RepoName);
 
-        using var httpClient = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
-
-        HttpResponseMessage resp;
+        List<RepoRecapEntry> entries;
 
         try {
-            resp = await httpClient.GetWithRetryAsync($"{baseUrl}/api/repositories/{hash}/recaps?limit={limit}");
-        } catch (HttpRequestException ex) {
-            HttpClientExtensions.WriteUnreachableError(baseUrl, ex);
+            entries = await repositoriesApi.GetRecapsAsync(hash, limit);
+        } catch (CapacitorApiException ex) {
+            Console.Error.WriteLine(ex.Message);
 
             return 1;
         }
 
-        if (await HttpClientExtensions.HandleUnauthorizedAsync(resp)) {
-            return 1;
-        }
-
-        if (!resp.IsSuccessStatusCode) {
-            Console.Error.WriteLine($"HTTP {(int)resp.StatusCode}");
-
-            return 1;
-        }
-
-        var json    = await resp.Content.ReadAsStringAsync();
-        var entries = JsonSerializer.Deserialize(json, CapacitorJsonContext.Default.ListRepoRecapEntry);
-
-        if (entries is null || entries.Count == 0) {
+        if (entries.Count == 0) {
             await Console.Out.WriteLineAsync($"No session summaries found for {repo.Owner}/{repo.RepoName}.");
 
             return 0;
@@ -73,51 +57,34 @@ class RecapCommand(ConfigRoot config, ProfileContext profiles) {
     }
 
     public async Task<int> HandleRecap(string sessionId, bool chain, bool full = false) {
-        var baseUrl = profiles.Resolution.ServerUrl!;
-        using var httpClient = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
-        var       query      = chain ? "?chain=true" : "";
-
-        HttpResponseMessage resp;
+        RecapResult result;
 
         try {
-            resp = await httpClient.GetWithRetryAsync($"{baseUrl}/api/sessions/{sessionId}/recap{query}");
-        } catch (HttpRequestException ex) {
-            HttpClientExtensions.WriteUnreachableError(baseUrl, ex);
+            result = await sessionsApi.GetRecapAsync(sessionId, chain);
+        } catch (CapacitorApiException ex) {
+            Console.Error.WriteLine(ex.Message);
 
             return 1;
         }
 
-        if (await HttpClientExtensions.HandleUnauthorizedAsync(resp)) {
-            return 1;
-        }
-
-        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) {
+        if (result is RecapResult.NotFound) {
             Console.Error.WriteLine($"Session not found: {sessionId}");
 
             return 1;
         }
 
-        if (!resp.IsSuccessStatusCode) {
-            Console.Error.WriteLine($"HTTP {(int)resp.StatusCode}");
+        var entries = ((RecapResult.Found)result).Entries;
 
-            return 1;
-        }
-
-        var json    = await resp.Content.ReadAsStringAsync();
-        var entries = JsonSerializer.Deserialize(json, CapacitorJsonContext.Default.ListRecapEntry);
-
-        if (entries is null || entries.Count == 0) {
+        if (entries.Count == 0) {
             await Console.Out.WriteLineAsync("No recap entries found.");
 
             return 0;
         }
 
-        return full ? PrintFull(entries, chain) : await PrintSummaryWithOutline(baseUrl, httpClient, entries, chain, sessionId);
+        return full ? PrintFull(entries, chain) : await PrintSummaryWithOutline(entries, chain, sessionId);
     }
 
-    static async Task<int> PrintSummaryWithOutline(
-            string baseUrl, HttpClient httpClient, List<RecapEntry> entries, bool chain, string sessionId
-        ) {
+    async Task<int> PrintSummaryWithOutline(List<RecapEntry> entries, bool chain, string sessionId) {
         var summaries = entries.Where(e => e.Type is "whats_done" or "plan").ToList();
 
         // Fetch outlines for the CONCRETE ids /recap resolved (a slug or chain maps to real session
@@ -156,7 +123,7 @@ class RecapCommand(ConfigRoot config, ProfileContext profiles) {
             }
 
             // Turn outline for this session.
-            var outline = await FetchTurnOutline(baseUrl, httpClient, sid);
+            var outline = await FetchTurnOutline(sid);
 
             if (outline.Length > 0) {
                 Console.Out.WriteLine(outline);
@@ -202,16 +169,13 @@ class RecapCommand(ConfigRoot config, ProfileContext profiles) {
             : "→ kcap recap --get-turn <N> <sessionId> for one turn's full detail";
 
     /// <summary>GETs /turns for one session and renders the outline block, or "" on any non-success.</summary>
-    static async Task<string> FetchTurnOutline(string baseUrl, HttpClient httpClient, string sessionId) {
+    async Task<string> FetchTurnOutline(string sessionId) {
         try {
             // Escape the id — session ids can be free-form slugs; matches the MCP BuildTurnsUrl path.
-            using var resp = await httpClient.GetWithRetryAsync(
-                $"{baseUrl}/api/sessions/{Uri.EscapeDataString(sessionId)}/turns");
+            var result = await sessionsApi.GetTurnsAsync(Uri.EscapeDataString(sessionId));
 
-            if (!resp.IsSuccessStatusCode) return "";
-
-            return FormatTurnOutline(await resp.Content.ReadAsStringAsync());
-        } catch (HttpRequestException) {
+            return result is TurnsResult.Found(var json) ? FormatTurnOutline(json) : "";
+        } catch (CapacitorApiException) {
             // Outline is best-effort enrichment on top of the summary — never fail recap on it.
             return "";
         }
@@ -330,36 +294,23 @@ class RecapCommand(ConfigRoot config, ProfileContext profiles) {
     /// (the CLI has no TurnClosed DTO and JsonDocument is AOT-safe).
     /// </summary>
     public async Task<int> HandlePerTurnRecap(string sessionId) {
-        var baseUrl = profiles.Resolution.ServerUrl!;
-        using var httpClient = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
-
-        HttpResponseMessage resp;
+        TurnsResult result;
 
         try {
-            resp = await httpClient.GetWithRetryAsync($"{baseUrl}/api/sessions/{sessionId}/turns");
-        } catch (HttpRequestException ex) {
-            HttpClientExtensions.WriteUnreachableError(baseUrl, ex);
+            result = await sessionsApi.GetTurnsAsync(sessionId);
+        } catch (CapacitorApiException ex) {
+            Console.Error.WriteLine(ex.Message);
 
             return 1;
         }
 
-        if (await HttpClientExtensions.HandleUnauthorizedAsync(resp)) {
-            return 1;
-        }
-
-        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) {
+        if (result is TurnsResult.NotFound) {
             Console.Error.WriteLine($"Session not found: {sessionId}");
 
             return 1;
         }
 
-        if (!resp.IsSuccessStatusCode) {
-            Console.Error.WriteLine($"HTTP {(int)resp.StatusCode}");
-
-            return 1;
-        }
-
-        var json = await resp.Content.ReadAsStringAsync();
+        var json = ((TurnsResult.Found)result).Json;
 
         using var doc = JsonDocument.Parse(json);
 
@@ -402,36 +353,23 @@ class RecapCommand(ConfigRoot config, ProfileContext profiles) {
     /// the session id is the usual positional (or comes from the current session).
     /// </summary>
     public async Task<int> HandleGetTurn(string sessionId, int turnIndex) {
-        var baseUrl = profiles.Resolution.ServerUrl!;
-        using var httpClient = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
-
-        HttpResponseMessage resp;
+        TurnDetailResult result;
 
         try {
-            resp = await httpClient.GetWithRetryAsync($"{baseUrl}/api/sessions/{sessionId}/turns/{turnIndex}");
-        } catch (HttpRequestException ex) {
-            HttpClientExtensions.WriteUnreachableError(baseUrl, ex);
+            result = await sessionsApi.GetTurnAsync(sessionId, turnIndex);
+        } catch (CapacitorApiException ex) {
+            Console.Error.WriteLine(ex.Message);
 
             return 1;
         }
 
-        if (await HttpClientExtensions.HandleUnauthorizedAsync(resp)) {
-            return 1;
-        }
-
-        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) {
+        if (result is TurnDetailResult.NotFound) {
             Console.Error.WriteLine($"Turn {turnIndex} not found for session {sessionId}");
 
             return 1;
         }
 
-        if (!resp.IsSuccessStatusCode) {
-            Console.Error.WriteLine($"HTTP {(int)resp.StatusCode}");
-
-            return 1;
-        }
-
-        var json = await resp.Content.ReadAsStringAsync();
+        var json = ((TurnDetailResult.Found)result).Json;
 
         using var doc = JsonDocument.Parse(json);
 

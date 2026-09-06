@@ -5,6 +5,8 @@ using Capacitor.Cli.Core;
 using Capacitor.Cli.Core.Config;
 using Capacitor.Cli.Core.Harness.Gemini;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Harness.Gemini;
 
 /// <summary>
@@ -23,8 +25,8 @@ namespace Capacitor.Cli.Harness.Gemini;
 /// <c>SubagentStarted</c> + content but no <c>SubagentCompleted</c>. Best-effort per step
 /// (a failure on one subagent — or one step — never skips the rest; re-import recovers).
 /// </summary>
-sealed class GeminiSubagentTeardown(ConfigRoot config, ProfileContext profiles) {
-    readonly WatcherManager _watchers = new(config, profiles);
+sealed class GeminiSubagentTeardown(ConfigRoot config, ProfileContext profiles, ICapacitorHttpClient http) {
+    readonly WatcherManager _watchers = new(config, profiles, http);
 
     /// <summary>
     /// Time budget for the teardown on a shutdown path (the parent-exit watchdog), so a slow
@@ -56,7 +58,7 @@ sealed class GeminiSubagentTeardown(ConfigRoot config, ProfileContext profiles) 
 
     async Task PostStopAsync(string sessionId, string agentId, string agentType, string subFile) {
         var       baseUrl = profiles.Resolution.ServerUrl!;
-        using var client  = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
+        using var client  = await http.ForBackgroundAsync();
         var       payload = GeminiSubagentDiscovery.BuildStopPayload(sessionId, agentId, agentType, subFile);
         using var content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
         await client.PostWithRetryAsync($"{baseUrl}/hooks/subagent-stop", content);

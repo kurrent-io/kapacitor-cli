@@ -1,3 +1,4 @@
+using Capacitor.Cli.Core;
 using System.Text.Json.Nodes;
 
 namespace Capacitor.Cli.Tests.Unit;

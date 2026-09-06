@@ -20,7 +20,7 @@ public class AuthCancellationTests {
     }
 
     // The device-code and poll endpoints are hardcoded to github.com with no URL seam, so
-    // cancellation is exercised against a fake handler on the injected HttpClient instead.
+    // cancellation is exercised against a fake handler behind the injected client instead.
     sealed class FakeGitHubDeviceHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) {
             ct.ThrowIfCancellationRequested();
@@ -49,9 +49,10 @@ public class AuthCancellationTests {
 
             return JsonResponse("""{"error":"authorization_pending"}""");
         });
-        using var http = new HttpClient(handler);
+        var github = new GitHubOAuthClient(new PlainHttpClientFactory(handler));
 
-        await Assert.That(async () => await OAuthLoginFlow.RunDeviceFlowAsync(http, "client_id", new RecordingBrowser(), cts.Token))
+        await Assert.That(async () => await OAuthLoginFlow.RunDeviceFlowAsync(
+                github, "client_id", new RecordingBrowser(), cts.Token))
             .Throws<OperationCanceledException>();
 
         await Assert.That(pollCount).IsGreaterThanOrEqualTo(3);

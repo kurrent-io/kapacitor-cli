@@ -69,7 +69,7 @@ public class SpoolOutageRecoveryTests : IDisposable {
 
     // HandleCore takes a pre-built HttpClient so we bypass auth entirely.
     Task<int> Invoke(HttpClient client, string payload) =>
-        new ClaudeHookCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), new HookClock(TimeProvider.System), Home)
+        new ClaudeHookCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient())
             .HandleCore(client, AuthStatus.Ok, MakeSpool(), new StringReader(payload));
 
     IEnumerable<string> SpoolFiles =>

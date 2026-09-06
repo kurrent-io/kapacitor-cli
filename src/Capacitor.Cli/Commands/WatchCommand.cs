@@ -22,13 +22,46 @@ using Capacitor.Cli.Harness.OpenCode;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.DependencyInjection;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands;
 
-partial class WatchCommand(ConfigRoot config, ProfileContext profiles, UserHome home) {
+partial class WatchCommand(
+        ConfigRoot config, ProfileContext profiles, UserHome home, ICapacitorHttpClient http,
+        ICredentialSource credentials) {
     readonly CursorMarkers  _markers  = new(config);
-    readonly WatcherManager _watchers = new(config, profiles);
+    readonly WatcherManager _watchers = new(config, profiles, http);
 
     string Url => profiles.Resolution.ServerUrl!;
+
+    /// <summary>
+    /// The watcher's hub connection, carrying the bearer the credential source holds at connect time.
+    /// </summary>
+    internal HubConnection BuildHubConnection(string hubUrl) {
+        var hubConnection = new HubConnectionBuilder()
+            .WithUrl(
+                hubUrl,
+                options => {
+                    // Resolved per connect and per reconnect, not captured: a reconnect after a long
+                    // outage must send whatever the credential is by then, not the one this watcher
+                    // started with.
+                    options.AccessTokenProvider = async () => (await credentials.ResolveAsync(default)).Bearer;
+                }
+            )
+            .WithAutomaticReconnect(new InfiniteRetryPolicy())
+            .AddJsonProtocol(options => {
+                    options.PayloadSerializerOptions.TypeInfoResolverChain.Insert(0, CapacitorJsonContext.Default);
+                    options.PayloadSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower;
+                }
+            )
+            .Build();
+
+        // Halve KeepAliveInterval (15s → 7s); see ServerConnection for rationale.
+        // ServerTimeout stays at the 30s default for rollout safety.
+        hubConnection.KeepAliveInterval = TimeSpan.FromSeconds(7);
+
+        return hubConnection;
+    }
 
     /// <summary>Outcome of deciding whether the parent-exit watchdog can run.</summary>
     internal enum ParentWatchdog {
@@ -198,11 +231,10 @@ partial class WatchCommand(ConfigRoot config, ProfileContext profiles, UserHome 
             string  vendor    = "claude"
         ) {
         // BEFORE the log redirection below: SignalR's WithUrl builds a Uri synchronously, so a
-        // relative value fails there — ahead of the connect/retry loop and independently of
-        // EnsureAbsolute — and `watch` is not fail-open, so the top-level catch turns that into an
-        // opaque exit 1. Validating here gives a hand-run watcher the actionable hint on the real
-        // stderr and the same exit 2 every interactive command gives; a few lines later Console.Error
-        // is a log file nobody is looking at.
+        // relative value fails there — ahead of the connect/retry loop — and `watch` is not
+        // fail-open, so the top-level catch turns that into an opaque exit 1. Validating here gives
+        // a hand-run watcher the actionable hint on the real stderr and the same exit 2 every
+        // interactive command gives; a few lines later Console.Error is a log file nobody is looking at.
         if (!HookHttp.IsPostable(Url)) {
             Console.Error.WriteLine(HttpClientExtensions.SchemeMissingHint);
             return 2;
@@ -497,31 +529,7 @@ partial class WatchCommand(ConfigRoot config, ProfileContext profiles, UserHome 
 
         Log($"Watching {transcriptPath} for session {sessionId}" + (agentId is not null ? $" agent {agentId}" : ""));
 
-        // Build SignalR hub connection
-        var hubUrl = $"{Url}/hubs/sessions";
-
-        var hubConnection = new HubConnectionBuilder()
-            .WithUrl(
-                hubUrl,
-                options => {
-                    options.AccessTokenProvider = async () => {
-                        var resolution = await new TokenStore(config).GetValidTokensForServerAsync(profiles.Name, Url);
-
-                        return resolution.Tokens?.AccessToken;
-                    };
-                }
-            )
-            .WithAutomaticReconnect(new InfiniteRetryPolicy())
-            .AddJsonProtocol(options => {
-                    options.PayloadSerializerOptions.TypeInfoResolverChain.Insert(0, CapacitorJsonContext.Default);
-                    options.PayloadSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower;
-                }
-            )
-            .Build();
-
-        // Halve KeepAliveInterval (15s → 7s); see ServerConnection for rationale.
-        // ServerTimeout stays at the 30s default for rollout safety.
-        hubConnection.KeepAliveInterval = TimeSpan.FromSeconds(7);
+        var hubConnection = BuildHubConnection($"{Url}/hubs/sessions");
 
         // runs DrainNewLines under cursorRewindGate when one
         // exists, so it can never observe a half-applied reconnect rewind (see cursorRewindGate's
@@ -1005,7 +1013,7 @@ partial class WatchCommand(ConfigRoot config, ProfileContext profiles, UserHome 
         string sessionId, string agentId, string agentType, string subFile, CancellationToken ct
     ) {
         try {
-            using var client  = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, Url, ct);
+            using var client  = await http.ForBackgroundAsync(ct);
             var       payload = GeminiSubagentDiscovery.BuildStartPayload(sessionId, agentId, agentType, subFile);
             using var content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
             using var resp    = await client.PostWithRetryAsync($"{Url}/hooks/subagent-start", content, ct: ct);
@@ -1070,7 +1078,7 @@ partial class WatchCommand(ConfigRoot config, ProfileContext profiles, UserHome 
         string sessionId, string agentId, string agentType, string subFile, CancellationToken ct
     ) {
         try {
-            using var client  = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, Url, ct);
+            using var client  = await http.ForBackgroundAsync(ct);
             var       payload = OpenCodeSubagentDiscovery.BuildStartPayload(sessionId, agentId, agentType, subFile);
             using var content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
             using var resp    = await client.PostWithRetryAsync($"{Url}/hooks/subagent-start", content, ct: ct);
@@ -1157,7 +1165,7 @@ partial class WatchCommand(ConfigRoot config, ProfileContext profiles, UserHome 
         string sessionId, string agentId, string agentType, string subFile, CancellationToken ct
     ) {
         try {
-            using var client  = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, Url, ct);
+            using var client  = await http.ForBackgroundAsync(ct);
             var       payload = CodexSubagentDiscovery.BuildStartPayload(sessionId, agentId, agentType, subFile);
             using var content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
             using var resp    = await client.PostWithRetryAsync($"{Url}/hooks/subagent-start", content, ct: ct);
@@ -1201,7 +1209,7 @@ partial class WatchCommand(ConfigRoot config, ProfileContext profiles, UserHome 
             using var budgetCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             budgetCts.CancelAfter(CodexSubagentStopPostBudget);
 
-            using var client  = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, Url, budgetCts.Token);
+            using var client  = await http.ForBackgroundAsync(budgetCts.Token);
             var       payload = CodexSubagentDiscovery.BuildStopPayload(sessionId, agentId, agentType, subFile);
             using var content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
             using var resp    = await client.PostWithRetryAsync($"{Url}/hooks/subagent-stop", content, timeout: CodexSubagentStopPostBudget, ct: budgetCts.Token);
@@ -1640,7 +1648,7 @@ partial class WatchCommand(ConfigRoot config, ProfileContext profiles, UserHome 
         if (vendor == "gemini") {
             try {
                 var finalized = await TimeBudget.RunCappedAsync(
-                    () => new GeminiSubagentTeardown(config, profiles).DrainAsync(sessionId, transcriptPath),
+                    () => new GeminiSubagentTeardown(config, profiles, http).DrainAsync(sessionId, transcriptPath),
                     GeminiSubagentTeardown.DrainCap);
 
                 if (!finalized) {
@@ -1661,7 +1669,7 @@ partial class WatchCommand(ConfigRoot config, ProfileContext profiles, UserHome 
         if (vendor == "codex") {
             try {
                 var finalized = await TimeBudget.RunCappedAsync(
-                    () => new CodexSubagentTeardown(config, profiles).DrainAsync(sessionId, transcriptPath),
+                    () => new CodexSubagentTeardown(config, profiles, http).DrainAsync(sessionId, transcriptPath),
                     CodexSubagentTeardown.DrainCap);
 
                 if (!finalized) {
@@ -1686,7 +1694,7 @@ partial class WatchCommand(ConfigRoot config, ProfileContext profiles, UserHome 
             // ceiling and returns how many were left unfinalized (logged below — OpenCode has no
             // historical import to recover a missed stop).
             try {
-                var unfinalized = await new OpenCodeSubagentTeardown(config, profiles).DrainAsync(sessionId, transcriptPath);
+                var unfinalized = await new OpenCodeSubagentTeardown(config, profiles, http).DrainAsync(sessionId, transcriptPath);
                 if (unfinalized > 0) {
                     Log($"Parent-exit OpenCode subagent teardown hit the {OpenCodeSubagentTeardown.OverallBudget.TotalSeconds:0}s ceiling; "
                       + $"{unfinalized} subagent(s) left without SubagentCompleted");
@@ -1720,7 +1728,7 @@ partial class WatchCommand(ConfigRoot config, ProfileContext profiles, UserHome 
                 );
             }
 
-            using var httpClient = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, Url, budgetCts.Token);
+            using var httpClient = await http.ForBackgroundAsync(budgetCts.Token);
             using var content    = new StringContent(endHook.ToJsonString(), Encoding.UTF8, "application/json");
 
             var url = $"{Url}/hooks/session-end/{vendor}";
@@ -2961,7 +2969,7 @@ partial class WatchCommand(ConfigRoot config, ProfileContext profiles, UserHome 
         string sessionId, string childId, CancellationToken ct
     ) {
         try {
-            using var client  = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, Url, ct);
+            using var client  = await http.ForBackgroundAsync(ct);
             var       payload = new JsonObject {
                 ["hook_event_name"] = "subagent-link",
                 ["session_id"]      = sessionId,

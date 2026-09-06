@@ -1,6 +1,7 @@
 using Capacitor.Cli.Core;
 using Capacitor.Cli.Core.Config;
 using Capacitor.Cli.Core.Eval;
+using Capacitor.Cli.Core.Http;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -17,29 +18,29 @@ namespace Capacitor.Cli.Daemon.Services;
 /// <c>EvalRunOrchestrator</c>) threads the phases together.</para>
 /// </summary>
 internal sealed class EvalRunner {
-    readonly ServerConnection    _connection;
-    readonly EvalContextCache    _cache;
-    readonly ILogger<EvalRunner> _logger;
-    readonly string              _baseUrl;
-    readonly CancellationToken   _shutdownToken;
-    readonly ConfigRoot          _configRoot;
-    readonly UserHome            _home;
-    readonly ProfileContext      _profiles;
+    readonly ServerConnection     _connection;
+    readonly EvalContextCache     _cache;
+    readonly ILogger<EvalRunner>  _logger;
+    readonly string               _baseUrl;
+    readonly CancellationToken    _shutdownToken;
+    readonly UserHome             _home;
+    readonly ProfileContext       _profiles;
+    readonly ICapacitorHttpClient _http;
 
     public EvalRunner(
             ServerConnection         connection,
             EvalContextCache         cache,
-            ConfigRoot               configRoot,
             UserHome                 home,
             DaemonConfig             config,
+            ICapacitorHttpClient     http,
             IHostApplicationLifetime lifetime,
             ILogger<EvalRunner>      logger
         ) {
         _connection    = connection;
         _cache         = cache;
-        _configRoot    = configRoot;
         _home          = home;
         _profiles      = config.Profiles;
+        _http          = http;
         _logger        = logger;
         _baseUrl       = config.ServerUrl.TrimEnd('/');
         _shutdownToken = lifetime.ApplicationStopping;
@@ -56,7 +57,7 @@ internal sealed class EvalRunner {
         // only by the daemon's shutdown token. Server-side phase timeouts
         // take effect via InvokeAsync<T>'s own timeout unwinding (the
         // daemon's response is simply discarded if the server moved on).
-        using var httpClient = await HttpClientExtensions.CreateAuthenticatedClientAsync(_configRoot, _profiles, _baseUrl, _shutdownToken);
+        using var httpClient = await _http.ForBackgroundAsync(_shutdownToken);
         var       observer   = new DaemonEvalObserver(_connection, cmd.EvalRunId, cmd.SessionId, _logger);
 
         try {
@@ -107,7 +108,7 @@ internal sealed class EvalRunner {
 
         if (ctx is null) return new(false, null, "context not cached (prepare missing or expired)", 0, 0);
 
-        using var httpClient = await HttpClientExtensions.CreateAuthenticatedClientAsync(_configRoot, _profiles, _baseUrl, _shutdownToken);
+        using var httpClient = await _http.ForBackgroundAsync(_shutdownToken);
         var       observer   = new DaemonEvalObserver(_connection, cmd.EvalRunId, ctx.SessionId, _logger);
 
         try {
@@ -152,7 +153,7 @@ internal sealed class EvalRunner {
 
         if (ctx is null) return new(false, "context not cached", null);
 
-        using var httpClient = await HttpClientExtensions.CreateAuthenticatedClientAsync(_configRoot, _profiles, _baseUrl, _shutdownToken);
+        using var httpClient = await _http.ForBackgroundAsync(_shutdownToken);
         var       observer   = new DaemonEvalObserver(_connection, cmd.EvalRunId, ctx.SessionId, _logger);
 
         try {

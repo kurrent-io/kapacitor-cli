@@ -1,5 +1,7 @@
 using System.Net;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Core.Tests.Unit;
 
 /// <summary>

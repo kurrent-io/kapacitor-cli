@@ -1,3 +1,5 @@
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Core.Config;
 
 /// <summary>
@@ -73,9 +75,8 @@ public static class ServerUrlNormalizer {
         string                                                  input,
         bool                                                    skipProbe,
         CancellationToken                                       ct,
-        Func<string, TimeSpan, CancellationToken, Task<bool>>?  probe = null) {
+        Func<string, TimeSpan, CancellationToken, Task<bool>>   probe) {
 
-        probe ??= HttpProbeAsync;
         var trimmed = input.TrimEnd('/');
 
         if (skipProbe) return new(WithLoopbackDefault(trimmed), null);
@@ -105,13 +106,19 @@ public static class ServerUrlNormalizer {
         return new(fallback, $"could not reach {trimmed} on https or http", Reachable: false);
     }
 
-    static async Task<bool> HttpProbeAsync(string url, TimeSpan timeout, CancellationToken ct) {
-        // ReSharper disable once ShortLivedHttpClient
-        using var http = new HttpClient();
-        http.Timeout = timeout;
+    /// <summary>The real probe. Anonymous by necessity, not by preference: the candidate is a server
+    /// the caller has not adopted, so there is no credential for it and sending one would be a
+    /// credential spent on an address the user may reject.</summary>
+    public static Func<string, TimeSpan, CancellationToken, Task<bool>> ProbeWith(ICapacitorHttpClient http) =>
+        (url, timeout, ct) => HttpProbeAsync(http, url, timeout, ct);
+
+    static async Task<bool> HttpProbeAsync(
+            ICapacitorHttpClient http, string url, TimeSpan timeout, CancellationToken ct) {
+        using var client = http.Anonymous();
+        client.Timeout = timeout;
 
         try {
-            using var resp = await http.GetAsync($"{url}/auth/config", ct);
+            using var resp = await client.GetAsync($"{url}/auth/config", ct);
             // Any HTTP response means the server is reachable. We do not require
             // 200 — older servers without /auth/config still count as "up".
             return true;

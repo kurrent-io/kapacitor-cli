@@ -8,6 +8,8 @@ using Capacitor.Cli.Core.Policy;
 using Capacitor.Cli.SessionStartMemory;
 using Capacitor.Cli.Core.Harness;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands.Harness;
 
 /// <summary>
@@ -18,8 +20,8 @@ namespace Capacitor.Cli.Commands.Harness;
 /// in the JSON payload — mirroring <see cref="CodexHookCommand"/> and
 /// <see cref="CursorHookCommand"/>.
 /// </summary>
-public sealed class ClaudeHookCommand(ConfigRoot config, ProfileContext profiles, HookClock clock, UserHome home) {
-    readonly WatcherManager _watchers = new(config, profiles);
+public sealed class ClaudeHookCommand(ConfigRoot config, ProfileContext profiles, HookClock clock, UserHome home, ICapacitorHttpClient http) {
+    readonly WatcherManager _watchers = new(config, profiles, http);
 
     string Url => profiles.Resolution.ServerUrl!;
 
@@ -51,14 +53,14 @@ public sealed class ClaudeHookCommand(ConfigRoot config, ProfileContext profiles
         return HandleWithDeps(
             spool,
             stdin,
-            () => HttpClientExtensions.CreateClientWithAuthStatusAsync(config, profiles, profiles.Resolution.ServerUrl!),
+            () => http.ForHookAsync(),
             stdout
         );
     }
 
     internal async Task<int> HandleWithDeps(
             HookSpool spool, TextReader stdin,
-            Func<Task<(HttpClient Client, AuthStatus Status)>> clientFactory,
+            Func<Task<AuthAttempt>> clientFactory,
             TextWriter? stdout = null) {
         string body;
         try { body = await stdin.ReadToEndAsync(); } catch { return 0; }
@@ -102,10 +104,9 @@ public sealed class ClaudeHookCommand(ConfigRoot config, ProfileContext profiles
             } catch { return 0; }
         }
 
-        // Skip client construction entirely for an unusable URL: the factory funnels into
-        // EnsureAbsolute, and this runs before ANY dispatch, so every Claude event would die here.
-        // Falling into the same degraded arm a client-creation timeout already uses keeps capture
-        // and the spool intact without inventing a second disposition.
+        // Skip client construction entirely for an unusable URL, before ANY dispatch, so it folds
+        // into the same degraded arm a client-creation timeout already uses — keeping capture and
+        // the spool intact without inventing a second disposition for a not-usable AuthAttempt.
         var created = HookHttp.IsPostable(Url)
             ? await CreateClientWithinBudgetAsync(clientFactory, clientCap)
             : null;
@@ -172,8 +173,8 @@ public sealed class ClaudeHookCommand(ConfigRoot config, ProfileContext profiles
 
     // Returns (client,status) if created within `cap`; null if the cap elapsed first
     // (abandoned creation task reaped on process exit).
-    internal static async Task<(HttpClient Client, AuthStatus Status)?> CreateClientWithinBudgetAsync(
-            Func<Task<(HttpClient Client, AuthStatus Status)>> factory, TimeSpan cap) {
+    internal static async Task<AuthAttempt?> CreateClientWithinBudgetAsync(
+            Func<Task<AuthAttempt>> factory, TimeSpan cap) {
         if (cap <= TimeSpan.Zero) return null;
         var task = factory();
         var winner = await Task.WhenAny(task, Task.Delay(cap));
@@ -381,7 +382,8 @@ public sealed class ClaudeHookCommand(ConfigRoot config, ProfileContext profiles
             var permProfile = profiles.Effective;
             var selfHeal    = !await IsSessionExcludedAsync(permProfile, body, budget);
 
-            return await new PermissionRequestCommand(config, profiles).Handle(body, selfHeal, stdout);
+            return await new PermissionRequestCommand(config, profiles, http)
+                .Handle(body, selfHeal, stdout);
         }
 
         // On session-start, clear the last-emitted repo cache so this session always gets a
@@ -1105,33 +1107,28 @@ public sealed class ClaudeHookCommand(ConfigRoot config, ProfileContext profiles
         }
     }
 
-    Task<string?> StartMemoryIndexTask(
+    async Task<string?> StartMemoryIndexTask(
         string? nativeSessionId,
         string? cwd,
         bool disabled,
         SessionLifecycleReason reason,
         TimeSpan budget) {
         if (disabled || string.IsNullOrEmpty(nativeSessionId) || budget <= TimeSpan.Zero)
-            return Task.FromResult<string?>(null);
+            return null;
 
-        // The memory subsystem is optional. Keep construction itself inside the fail-open
-        // boundary: store-root validation and the injected client factory can throw synchronously.
+        // The memory subsystem is optional, and the whole fetch stays inside the fail-open boundary.
         try {
-            var store = SessionStartMemoryLeaseStore.Create(config, clock.Time);
-            // Ours to dispose: the factory mints a fresh authenticated client per call, and hands
-            // back a refreshed one after a 401. Never the hook's own client — that one is bound to
-            // the lifecycle POST's redirect policy and outlives this fetch.
+            var store    = SessionStartMemoryLeaseStore.Create(config, clock.Time);
             var provider = new SessionStartMemoryContextProvider(
-                new SessionStartMemoryScopeResolver(config),
-                SessionStartMemoryHookSupport.ClientFactory(config, profiles, Url),
-                disposeClients: true);
-            return new SessionStartMemoryOrchestrator(store, provider).GetFragmentAsync(
+                new SessionStartMemoryScopeResolver(config), http.ForBackgroundAsync);
+
+            return await new SessionStartMemoryOrchestrator(store, provider).GetFragmentAsync(
                 new SessionMemoryLifecycle(HarnessId.Claude, nativeSessionId, null,
                     IsTopLevel: true, ClassificationAuthoritative: true, reason,
                     CallbackMayRepeat: false),
                 new SessionStartMemoryContextRequest(Url, cwd, disabled, budget, CancellationToken.None));
         } catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException) {
-            return Task.FromResult<string?>(null);
+            return null;
         }
     }
 

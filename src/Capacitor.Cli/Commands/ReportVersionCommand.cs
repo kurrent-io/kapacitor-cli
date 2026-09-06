@@ -1,6 +1,8 @@
 using Capacitor.Cli.Core;
 using Capacitor.Cli.Core.Config;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands;
 
 /// <summary>
@@ -11,25 +13,22 @@ namespace Capacitor.Cli.Commands;
 /// immediately. Fail-open: never throws, never prints, always returns 0, bounded to
 /// <see cref="Budget"/> total (discovery + request).
 /// </summary>
-public sealed class ReportVersionCommand(ConfigRoot config, ProfileContext profiles) {
+public sealed class ReportVersionCommand(CapacitorServer server, ICapacitorHttpClient http) {
     static readonly TimeSpan Budget = TimeSpan.FromSeconds(5);
 
     public async Task<int> HandleAsync() {
         try {
             using var cts = new CancellationTokenSource(Budget);
 
-            // `report-version` is an offline command, so it is reached with no server configured —
-            // and it must still return 0 silently rather than error. The local default gives the
-            // probe somewhere to fail against.
-            var effectiveBaseUrl = profiles.Resolution.ServerUrl ?? "http://localhost:5108";
-
             var (client, status) =
-                await HttpClientExtensions.CreateClientWithAuthStatusAsync(config, profiles, effectiveBaseUrl, cts.Token);
+                await http.ForHookAsync(cts.Token);
 
             using (client) {
+                // Reached with no server configured — it is an offline command — and the status says
+                // so before a URL is needed, which is also what keeps the silent return honest.
                 if (status is not (AuthStatus.Ok or AuthStatus.NoAuthRequired)) return 0;
 
-                var url = AppConfig.NormalizeUrl(effectiveBaseUrl) + WhoamiCommand.ProbePath;
+                var url = AppConfig.NormalizeUrl(server.Url) + WhoamiCommand.ProbePath;
 
                 using var _ = await client.GetOnceAsync(url, Budget, cts.Token);
             }

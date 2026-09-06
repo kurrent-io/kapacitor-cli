@@ -3,10 +3,11 @@ using System.Text;
 using System.Text.Json;
 using Capacitor.Cli.Core;
 using Capacitor.Cli.Core.Config;
+using Capacitor.Cli.Core.Http;
 
 namespace Capacitor.Cli.Commands;
 
-class SessionsCommand(ConfigRoot config, ProfileContext profiles) {
+class SessionsCommand(ConfigRoot config, ProfileContext profiles, ICapacitorHttpClient http) {
     public async Task<int> HandleAsync(string[] args) {
         var options = SessionsArgs.Parse(args, out var error);
 
@@ -38,7 +39,7 @@ class SessionsCommand(ConfigRoot config, ProfileContext profiles) {
         }
 
         var       baseUrl    = profiles.Resolution.ServerUrl!;
-        using var httpClient = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl);
+        using var httpClient = await http.ForCommandAsync();
 
         HttpResponseMessage resp;
 

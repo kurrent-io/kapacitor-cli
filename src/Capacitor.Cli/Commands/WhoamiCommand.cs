@@ -3,6 +3,8 @@ using Capacitor.Cli.Core;
 using Capacitor.Cli.Core.Auth;
 using Capacitor.Cli.Core.Config;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands;
 
 /// <summary>
@@ -10,7 +12,9 @@ namespace Capacitor.Cli.Commands;
 /// is not an answer: "expires tomorrow" only says a clock hasn't passed, so a token the server
 /// rejects still looks valid. Hence the probe.
 /// </summary>
-public sealed class WhoamiCommand(ConfigRoot config, ProfileContext profiles) {
+public sealed class WhoamiCommand(
+        ConfigRoot config, ProfileContext profiles, TokenStore tokens, ICapacitorHttpClient http,
+        AuthProviderDiscovery discovery) {
     /// <summary>Cheap authenticated GET used purely to ask "do you accept this token?".</summary>
     internal const string ProbePath = "/api/me/notification-prefs";
 
@@ -37,7 +41,7 @@ public sealed class WhoamiCommand(ConfigRoot config, ProfileContext profiles) {
     public async Task<int> HandleAsync() {
         var baseUrl = profiles.Resolution.ServerUrl!;
 
-        var provider = await HttpClientExtensions.DiscoverProviderAsync(baseUrl, config, profiles);
+        var provider = await discovery.DiscoverAsync(baseUrl, config, profiles, tokens);
 
         if (provider == "None") {
             await Console.Out.WriteLineAsync("Provider: None (no authentication)");
@@ -51,7 +55,7 @@ public sealed class WhoamiCommand(ConfigRoot config, ProfileContext profiles) {
         // WorkOS credential (single-use refresh token) as a side effect of merely running whoami,
         // and would let the expiry printed here describe a different token than the one probed.
         var profile  = profiles.Name;
-        var snapshot = await new TokenStore(config).LoadForProfileAsync(profile);
+        var snapshot = await tokens.LoadForProfileAsync(profile);
 
         if (snapshot is null) {
             Console.Error.WriteLine("Not authenticated. Run `kcap login`.");
@@ -85,17 +89,13 @@ public sealed class WhoamiCommand(ConfigRoot config, ProfileContext profiles) {
     // distinct from any status code the server did return.
     async Task<HttpStatusCode?> ProbeAsync(string baseUrl, string accessToken) {
         try {
-            // No redirect following: a login redirect would otherwise masquerade as some other
-            // status. No retry handler either — this client must send exactly the token we printed.
-            using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
-            http.DefaultRequestHeaders.Authorization = new("Bearer", accessToken);
+            // The lane sends exactly the token printed above: no rotation, because the question is
+            // whether THIS token is accepted, and no redirect, because the hop would strip it and
+            // return a 401 that reads as the server's verdict.
+            using var client = http.Bearer();
+            client.DefaultRequestHeaders.Authorization = new("Bearer", accessToken);
 
-            // This probe deliberately bypasses HttpClientExtensions' choke point (it must not
-            // mutate auth state), so it attaches the same observation headers explicitly rather
-            // than inheriting them for free.
-            HttpClientExtensions.AttachObservationHeaders(profiles, http);
-
-            using var response = await http.GetOnceAsync(
+            using var response = await client.GetOnceAsync(
                 $"{AppConfig.NormalizeUrl(baseUrl)}{ProbePath}", ProbeTimeout);
 
             return response.StatusCode;

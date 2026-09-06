@@ -1,5 +1,6 @@
 using Capacitor.Cli.Commands;
 using Capacitor.Cli.Core.Auth;
+using Capacitor.Cli.Core.Commands;
 // TUnit ships a DiscoveryResult of its own, and both are in scope here.
 using DiscoveryResult = Capacitor.Cli.Core.Auth.DiscoveryResult;
 using Microsoft.Extensions.Time.Testing;
@@ -33,6 +34,8 @@ public class BrowserTenantPickerTests {
             Task.FromResult(new DiscoveryResult([], DiscoveryError.None));
         public Task<DiscoveryResult> DiscoverWorkOSTenantsAsync(string u, string t, CancellationToken ct = default) =>
             Task.FromResult(new DiscoveryResult([], DiscoveryError.None));
+        public Task<MachineProvisioningResult> CreateMachineApplicationAsync(string u, string b, string n, CancellationToken ct = default) =>
+            throw new NotSupportedException("the picker never provisions");
 
         public Task<CliPickerPrepareResponse?> PreparePickAsync(string u, string bearer, string hash, CancellationToken ct = default) {
             PreparedWithBearer = bearer;

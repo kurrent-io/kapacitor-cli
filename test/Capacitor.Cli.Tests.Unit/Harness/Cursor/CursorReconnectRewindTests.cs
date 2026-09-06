@@ -20,7 +20,7 @@ namespace Capacitor.Cli.Tests.Unit.Harness.Cursor;
 public class CursorReconnectRewindTests {
     [TempHome] public required TempHome Home { get; init; }
 
-    WatchCommand Watch => field ??= new(Config.Root, Resolutions.None(Config.Root), Home);
+    WatchCommand Watch => field ??= new(Config.Root, Resolutions.None(Config.Root), Home, new FixedCapacitorHttpClient(), new FixedCredentialSource());
 
     CursorMarkers Markers => new(Config.Root);
 

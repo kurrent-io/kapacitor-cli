@@ -150,7 +150,8 @@ public class GeminiSessionStartMemoryTests {
         using var capture = ConsoleOutput.StartCapture();
 
         // baseUrl is unreachable on purpose: these paths must return before any network work.
-        await new GeminiHookCommand(Config.Root, Resolutions.At("http://127.0.0.1:1", Config.Root), new HookClock(TimeProvider.System), Home).Handle(new StringReader(payload));
+        await new GeminiHookCommand(Config.Root, Resolutions.At("http://127.0.0.1:1", Config.Root),
+            new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).Handle(new StringReader(payload));
 
         return capture.GetCapturedOutput();
     }

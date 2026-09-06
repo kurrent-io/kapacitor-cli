@@ -1,6 +1,8 @@
 using Capacitor.Cli.Core;
 using Capacitor.Cli.Core.Config;
+using Capacitor.Cli.Core.Http;
 using Capacitor.Cli.Core.WorkItems;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Capacitor.App.Services;
 
@@ -27,12 +29,35 @@ public sealed class ServerWorkContextSource : IWorkContextSource, IAsyncDisposab
     readonly CancellationTokenSource _disposeCts = new();
     readonly List<Task> _active = [];
     ClientLease? _lease;
+    ServiceProvider? _lane;
     bool _disposed;
 
     public ServerWorkContextSource(ConfigRoot config, ProfileContext? profiles, ClientFactory? factory = null) {
         _config   = config;
         _profiles = profiles;
-        _factory  = factory ?? ((c, p, url, ct) => HttpClientExtensions.CreateClientWithAuthStatusAsync(c, p, url, ct, autoRetryUnauthorized: true));
+        _factory  = factory ?? RegisteredLaneAsync;
+    }
+
+    /// <summary>
+    /// The recovering lane, from a container of this source's own. The app holds no authenticated
+    /// container — that lane's handlers need a resolved server, which does not exist when the app
+    /// starts — so the one place that does have a server URL builds it, once, and disposes it here.
+    /// </summary>
+    async Task<(HttpClient Client, AuthStatus Status)> RegisteredLaneAsync(
+            ConfigRoot config, ProfileContext profiles, string serverUrl, CancellationToken ct) {
+        // Built under _buildGate, which BorrowAsync already holds, so no second lock is needed.
+        _lane ??= new ServiceCollection()
+            .AddSingleton(config)
+            .AddSingleton(profiles)
+            .AddSingleton(new CapacitorServer(serverUrl, config, profiles))
+            .AddCapacitorHttp()
+            .BuildServiceProvider();
+
+        // The waiting lane, not the hook one: this client is leased for as long as the pane is open,
+        // so it has to outlive a token that expires under it. The status is what retires the lease.
+        var attempt = await _lane.GetRequiredService<ICapacitorHttpClient>().ForWaitAsync(ct).ConfigureAwait(false);
+
+        return (attempt.Client, attempt.Status);
     }
 
     /// Registered under the lock before it can complete, so a concurrent DisposeAsync either
@@ -150,6 +175,10 @@ public sealed class ServerWorkContextSource : IWorkContextSource, IAsyncDisposab
             }
             if (dispose) lease.Client.Dispose();
         }
+        // After the lease, never before: disposing the container retires the handler chain the
+        // borrowed client sends on.
+        if (_lane is not null) await _lane.DisposeAsync().ConfigureAwait(false);
+
         _disposeCts.Dispose();
         _buildGate.Dispose();
     }

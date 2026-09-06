@@ -69,7 +69,7 @@ public class AntigravitySessionStartTests : IDisposable {
             }
             """;
 
-            var exit = await new AntigravityHookCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), new HookClock(TimeProvider.System), Home).Handle(["hook", "--antigravity", "PreInvocation"], new StringReader(payload),
+            var exit = await new AntigravityHookCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).Handle(["hook", "--antigravity", "PreInvocation"], new StringReader(payload),
             new StringWriter());
 
         await Assert.That(exit).IsEqualTo(0);
@@ -116,7 +116,7 @@ public class AntigravitySessionStartTests : IDisposable {
             }
             """;
 
-            var exit = await new AntigravityHookCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), new HookClock(TimeProvider.System), Home).Handle(["hook", "--antigravity", "PreInvocation"], new StringReader(payload),
+            var exit = await new AntigravityHookCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).Handle(["hook", "--antigravity", "PreInvocation"], new StringReader(payload),
             new StringWriter());
         await Assert.That(exit).IsEqualTo(0);
 

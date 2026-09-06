@@ -38,15 +38,15 @@ public class CrossProcessRefreshTests {
         // refreshed token must land in alpha.json — a persist path that re-resolved the active
         // profile would write it to default.json and leave alpha.json stale.
         var current = Token("old", DateTimeOffset.UtcNow.AddMinutes(-10)); // expired → default predicate refreshes
-        await new TokenStore(Config.Root).SaveAsync("alpha", current);
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("alpha", current);
 
         var refreshed = Token("new-alpha", DateTimeOffset.UtcNow.AddHours(1));
 
-        var result = await new TokenStore(Config.Root).RefreshWithCrossProcessLockAsync(
+        var result = await AuthFixtures.NewTokenStore(Config.Root).RefreshWithCrossProcessLockAsync(
             "alpha", current, _ => Task.FromResult<StoredTokens?>(refreshed));
 
         await Assert.That(result!.AccessToken).IsEqualTo("new-alpha");
-        await Assert.That((await new TokenStore(Config.Root).LoadAsync("alpha"))!.AccessToken).IsEqualTo("new-alpha");
+        await Assert.That((await AuthFixtures.NewTokenStore(Config.Root).LoadAsync("alpha"))!.AccessToken).IsEqualTo("new-alpha");
         await Assert.That(File.Exists(Path.Combine(TokensDir, "default.json"))).IsFalse();
     }
 
@@ -55,19 +55,19 @@ public class CrossProcessRefreshTests {
         // On-disk token equals `current` (no peer refresh) and is inside the proactive window →
         // refresh, and the result is persisted under the lock.
         var current = Token("same", DateTimeOffset.UtcNow.AddMinutes(3));
-        await new TokenStore(Config.Root).SaveAsync("alpha", current);
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("alpha", current);
 
         var refreshed     = Token("refreshed", DateTimeOffset.UtcNow.AddHours(1));
         var refreshCalled = false;
 
-        var result = await new TokenStore(Config.Root).RefreshWithCrossProcessLockAsync(
+        var result = await AuthFixtures.NewTokenStore(Config.Root).RefreshWithCrossProcessLockAsync(
             "alpha", current,
             _ => { refreshCalled = true; return Task.FromResult<StoredTokens?>(refreshed); },
             WithinWindow);
 
         await Assert.That(refreshCalled).IsTrue();
         await Assert.That(result!.AccessToken).IsEqualTo("refreshed");
-        await Assert.That((await new TokenStore(Config.Root).LoadAsync("alpha"))!.AccessToken).IsEqualTo("refreshed");
+        await Assert.That((await AuthFixtures.NewTokenStore(Config.Root).LoadAsync("alpha"))!.AccessToken).IsEqualTo("refreshed");
     }
 
     [Test]
@@ -77,11 +77,11 @@ public class CrossProcessRefreshTests {
         // The within-window predicate alone would re-refresh it — the peer-refresh guard must not.
         var current       = Token("old",  DateTimeOffset.UtcNow.AddMinutes(3));
         var peerRefreshed = Token("peer", DateTimeOffset.UtcNow.AddMinutes(3)); // changed, valid, still within window
-        await new TokenStore(Config.Root).SaveAsync("alpha", peerRefreshed);
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("alpha", peerRefreshed);
 
         var refreshCalled = false;
 
-        var result = await new TokenStore(Config.Root).RefreshWithCrossProcessLockAsync(
+        var result = await AuthFixtures.NewTokenStore(Config.Root).RefreshWithCrossProcessLockAsync(
             "alpha", current,
             _ => { refreshCalled = true; return Task.FromResult<StoredTokens?>(current); },
             WithinWindow);
@@ -96,16 +96,16 @@ public class CrossProcessRefreshTests {
         // and persists, even though the on-disk token changed (peer wrote an expired token).
         var current       = Token("old",     DateTimeOffset.UtcNow.AddMinutes(-10));
         var peerButExpired = Token("peer-x", DateTimeOffset.UtcNow.AddMinutes(-5)); // changed but still expired
-        await new TokenStore(Config.Root).SaveAsync("alpha", peerButExpired);
+        await AuthFixtures.NewTokenStore(Config.Root).SaveAsync("alpha", peerButExpired);
 
         var refreshed     = Token("fresh", DateTimeOffset.UtcNow.AddHours(1));
         var refreshCalled = false;
 
-        var result = await new TokenStore(Config.Root).RefreshWithCrossProcessLockAsync(
+        var result = await AuthFixtures.NewTokenStore(Config.Root).RefreshWithCrossProcessLockAsync(
             "alpha", current,
             _ => { refreshCalled = true; return Task.FromResult<StoredTokens?>(refreshed); });
 
         await Assert.That(refreshCalled).IsTrue();
-        await Assert.That((await new TokenStore(Config.Root).LoadAsync("alpha"))!.AccessToken).IsEqualTo("fresh");
+        await Assert.That((await AuthFixtures.NewTokenStore(Config.Root).LoadAsync("alpha"))!.AccessToken).IsEqualTo("fresh");
     }
 }

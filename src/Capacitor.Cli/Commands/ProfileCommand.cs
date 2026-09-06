@@ -1,9 +1,11 @@
 using Capacitor.Cli.Core.Config;
 using Capacitor.Cli.Core;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands;
 
-public sealed class ProfileCommand(ConfigRoot config) {
+public sealed class ProfileCommand(ConfigRoot config, ICapacitorHttpClient http) {
     public async Task<int> HandleAsync(string[] args) {
         if (args.Length < 2) {
             await PrintUsage();
@@ -58,7 +60,7 @@ public sealed class ProfileCommand(ConfigRoot config) {
         }
 
         var normalized = await ServerUrlNormalizer.NormalizeAsync(
-            serverUrl, skipProbe, CancellationToken.None);
+            serverUrl, skipProbe, CancellationToken.None, ServerUrlNormalizer.ProbeWith(http));
 
         if (normalized.Warning is not null)
             await Console.Error.WriteLineAsync($"Warning: {normalized.Warning}");

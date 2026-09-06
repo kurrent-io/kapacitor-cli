@@ -111,7 +111,7 @@ public class CursorSubagentStaleStateTests {
             using var client = new HttpClient(handler);
             var spool = new HookSpool(tmp.PathTo("spool"));
 
-            await new CursorHookCommand(Config.Root, Resolutions.At("http://s", Config.Root), new HookClock(TimeProvider.System), Home).HandleCore(
+            await new CursorHookCommand(Config.Root, Resolutions.At("http://s", Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).HandleCore(
                 client,
                 new StringReader($$"""{"hook_event_name":"afterAgentThought","session_id":"{{child}}","generation_id":"g","text":"t","transcript_path":"{{childFile.Replace(@"\", @"\\")}}"}"""),
                 spool);
@@ -173,7 +173,7 @@ public class CursorSubagentStaleStateTests {
             // posted), so a test that bypassed it by calling HandleSubagentChildEventAsync would
             // keep passing after the remedy landed — defeating the whole point of a
             // characterization test.
-            await new CursorHookCommand(Config.Root, Resolutions.At("http://s", Config.Root), new HookClock(TimeProvider.System), Home).HandleCore(
+            await new CursorHookCommand(Config.Root, Resolutions.At("http://s", Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).HandleCore(
                 client,
                 new StringReader($$"""{"hook_event_name":"sessionStart","session_id":"{{child}}","transcript_path":"{{childPath.Replace(@"\", @"\\")}}"}"""),
                 spool);
@@ -222,7 +222,7 @@ public class CursorSubagentStaleStateTests {
             var spool = new HookSpool(tmp.PathTo("spool"));
 
             // Again through the REAL CALLER — see the note in the test above.
-            await new CursorHookCommand(Config.Root, Resolutions.At("http://s", Config.Root), new HookClock(TimeProvider.System), Home).HandleCore(
+            await new CursorHookCommand(Config.Root, Resolutions.At("http://s", Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).HandleCore(
                 client,
                 new StringReader($$"""{"hook_event_name":"sessionStart","session_id":"{{child}}","transcript_path":"{{childPath.Replace(@"\", @"\\")}}"}"""),
                 spool);
@@ -236,7 +236,7 @@ public class CursorSubagentStaleStateTests {
             // ordinary top-level route. THE FINDING: two watchers now tail the SAME transcript,
             // one under the parent and one as the child's own session.
             routes.Clear();
-            await new CursorHookCommand(Config.Root, Resolutions.At("http://s", Config.Root), new HookClock(TimeProvider.System), Home).HandleCore(
+            await new CursorHookCommand(Config.Root, Resolutions.At("http://s", Config.Root), new HookClock(TimeProvider.System), Home, new FixedCapacitorHttpClient()).HandleCore(
                 client,
                 new StringReader($$"""{"hook_event_name":"afterAgentResponse","session_id":"{{child}}","transcript_path":"{{childPath.Replace(@"\", @"\\")}}"}"""),
                 spool);

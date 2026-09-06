@@ -6,6 +6,8 @@ using Capacitor.Cli.Core.Harness.Copilot;
 using Capacitor.Cli.SessionStartMemory;
 using Capacitor.Cli.Core.Harness;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Commands.Harness;
 
 /// <summary>
@@ -40,9 +42,9 @@ namespace Capacitor.Cli.Commands.Harness;
 /// sessionStart, which writes a single {"additionalContext":"…"} document when — and only when —
 /// a team-memory fragment is available to inject.
 /// </remarks>
-sealed class CopilotHookCommand(ConfigRoot config, ProfileContext profiles, HookClock clock, UserHome home) {
-    readonly WatcherManager  _watchers = new(config, profiles);
-    readonly AgentHookPoster _poster   = new(config, profiles);
+sealed class CopilotHookCommand(ConfigRoot config, ProfileContext profiles, HookClock clock, UserHome home, ICapacitorHttpClient http) {
+    readonly WatcherManager  _watchers = new(config, profiles, http);
+    readonly AgentHookPoster _poster   = new(config, profiles, http);
 
     string Url => profiles.Resolution.ServerUrl!;
 
@@ -94,7 +96,7 @@ sealed class CopilotHookCommand(ConfigRoot config, ProfileContext profiles, Hook
     /// reason is mapped from it rather than assumed; re-injection across a resume of the same session
     /// id is prevented by the shared lease keyed on (harness, session id).</para>
     /// </summary>
-    Task<string?> StartMemoryIndexTask(
+    async Task<string?> StartMemoryIndexTask(
             string     sessionId,
             string?    scopeRoot,
             string?    source,
@@ -104,17 +106,14 @@ sealed class CopilotHookCommand(ConfigRoot config, ProfileContext profiles, Hook
             Func<CancellationToken, Task<bool>>? commitGate) {
         if ((disabled && guidelinesDisabled) || string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(scopeRoot)
          || budget <= TimeSpan.Zero
-         || !SessionStartMemoryHookSupport.CanAttempt(Url))
-            return Task.FromResult<string?>(null);
+         || !HookHttp.IsPostable(Url))
+            return null;
 
         try {
             var store    = SessionStartMemoryLeaseStore.Create(config, clock.Time);
-            var provider = SessionStartMemoryHookSupport.CompositeProvider(
-                config,
-                SessionStartMemoryHookSupport.ClientFactory(config, profiles, Url),
-                disposeClients: true);
+            var provider = SessionStartMemoryHookSupport.CompositeProvider(config, http.ForBackgroundAsync);
 
-            return new SessionStartMemoryOrchestrator(store, provider).GetFragmentAsync(
+            return await new SessionStartMemoryOrchestrator(store, provider).GetFragmentAsync(
                 new SessionMemoryLifecycle(HarnessId.Copilot, sessionId, LifecycleInstanceId: null,
                     IsTopLevel: true, ClassificationAuthoritative: true,
                     SessionStartMemoryHookSupport.ReasonFor(source), CallbackMayRepeat: false),
@@ -122,7 +121,7 @@ sealed class CopilotHookCommand(ConfigRoot config, ProfileContext profiles, Hook
                     GuidelinesDisabled: guidelinesDisabled),
                 commitGate);
         } catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException) {
-            return Task.FromResult<string?>(null);
+            return null;
         }
     }
 
@@ -433,9 +432,9 @@ sealed class CopilotHookCommand(ConfigRoot config, ProfileContext profiles, Hook
         // path so a stalled server can't block Copilot's loop.
         using var cts = new CancellationTokenSource(NotificationPostBudget);
         try {
-            // Status-returning variant (not CreateAuthenticatedClientAsync, which writes a
-            // per-turn "expired" line to stderr): on a lapse, stay quiet and skip the doomed POST.
-            var (client, status) = await HttpClientExtensions.CreateClientWithAuthStatusAsync(config, profiles, Url, cts.Token);
+            // The hook verb, so a lapse writes nothing to stderr: stay quiet and skip the doomed
+            // POST rather than spend a per-turn line on it.
+            var (client, status) = await http.ForHookAsync(cts.Token);
             using (client) {
                 if (AgentHookPoster.IsAuthLapsed(status)) return 0;
                 using var content = new StringContent(forwarded.ToJsonString(), Encoding.UTF8, "application/json");

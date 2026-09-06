@@ -1,4 +1,5 @@
 using Capacitor.Cli.Core.Config;
+using Capacitor.Cli.Core.Http;
 using Duende.IdentityModel.OidcClient.Browser;
 using Config_Profile = Capacitor.Cli.Core.Config.Profile;
 
@@ -132,17 +133,22 @@ sealed record LoginTarget(string Profile, string CanonicalServer, string ServerU
 /// throwing aborts the operation with nothing written (the caller may retry).
 /// </param>
 /// <param name="httpFactory">
-/// The client for every HTTP leg (the GitHub browser flow and OidcClient still make their own). A
-/// supplied factory owns its clients' lifetime; the default creates and disposes one per operation.
+/// Draws the anonymous lane for the legs that carry no credential of ours — the auth-config read and
+/// the token exchange. Drawn per operation: a client taken at construction would freeze the handler
+/// it was built with.
 /// </param>
 public sealed class OnboardingFacade(
         ConfigRoot                                                  root,
+        TokenStore                                                  store,
+        IHttpClientFactory                                          httpFactory,
+        IAuthProxyClient                                            proxy,
+        GitHubOAuthClient                                           github,
+        WorkOSClient                                                workos,
         IAuthProgress                                               progress,
         IBrowserLauncher                                            launcher,
         ITenantPicker                                               picker,
         ITenantProvisioner?                                         provisioner,
-        Func<IReadOnlyList<AuthIdentity>, CancellationToken, Task>? beforeCommit,
-        Func<HttpClient>?                                           httpFactory = null) {
+        Func<IReadOnlyList<AuthIdentity>, CancellationToken, Task>? beforeCommit) {
     /// <summary>Test seam for the one WorkOS effect with no HTTP surface (loopback browser + OidcClient).</summary>
     internal Func<CancellationToken, Task<WorkOSAuthResponse?>>? WorkOSOrglessLogin { get; init; }
 
@@ -162,30 +168,18 @@ public sealed class OnboardingFacade(
     /// When the profile doesn't already name this server: true writes its <c>server_url</c> and the
     /// provider stamp, false leaves config untouched (a <c>None</c> server then has nothing to sign in with).
     /// </param>
-    public async Task<AuthResult> LoginAsync(
-            string serverUrl, bool forceDevice, string profile, CancellationToken ct, bool adoptServer = false) {
-        var http = httpFactory?.Invoke() ?? new HttpClient();
-
-        try {
-            return await GuardAsync(() => LoginCoreAsync(http, serverUrl, forceDevice, profile, adoptServer, ct), ct);
-        } finally {
-            if (httpFactory is null) http.Dispose();
-        }
-    }
+    public Task<AuthResult> LoginAsync(
+            string serverUrl, bool forceDevice, string profile, CancellationToken ct, bool adoptServer = false) =>
+        GuardAsync(() => LoginCoreAsync(serverUrl, forceDevice, profile, adoptServer, ct), ct);
 
     /// <param name="provider"><see cref="AuthProvider.GitHubApp"/> or <see cref="AuthProvider.WorkOS"/>.</param>
-    public async Task<AuthResult> DiscoverAsync(string provider, bool forceDevice, CancellationToken ct) {
-        var http = httpFactory?.Invoke() ?? new HttpClient();
-
-        try {
-            return await GuardAsync(() => DiscoverCoreAsync(http, provider, forceDevice, ct), ct);
-        } finally {
-            if (httpFactory is null) http.Dispose();
-        }
-    }
+    public Task<AuthResult> DiscoverAsync(string provider, bool forceDevice, CancellationToken ct) =>
+        GuardAsync(() => DiscoverCoreAsync(provider, forceDevice, ct), ct);
 
     async Task<AuthResult> LoginCoreAsync(
-            HttpClient http, string serverUrl, bool forceDevice, string profile, bool adoptServer, CancellationToken ct) {
+            string serverUrl, bool forceDevice, string profile, bool adoptServer, CancellationToken ct) {
+        using var http = httpFactory.CreateClient(CapacitorClients.Anonymous);
+
         var config = await OAuthLoginFlow.FetchAuthConfigAsync(http, serverUrl, ct, progress);
 
         if (config is null) return Stop($"Failed to fetch auth config from {serverUrl}/auth/config", ct);
@@ -203,7 +197,7 @@ public sealed class OnboardingFacade(
         return config.Provider switch {
             AuthProvider.None      => await LoginNoneAsync(target, ct),
             AuthProvider.GitHubApp => await LoginGitHubAsync(http, config, forceDevice, target, ct),
-            AuthProvider.WorkOS    => await LoginWorkOSAsync(http, config, forceDevice, target, ct),
+            AuthProvider.WorkOS    => await LoginWorkOSAsync(config, forceDevice, target, ct),
             _                      => UnknownProvider(config.Provider)
         };
     }
@@ -233,7 +227,7 @@ public sealed class OnboardingFacade(
     async Task<AuthResult> LoginGitHubAsync(
             HttpClient http, AuthDiscoveryResponse config, bool forceDevice, LoginTarget target, CancellationToken ct) {
         var accessToken = await OAuthLoginFlow.AcquireGitHubTokenAsync(
-            http, config.GithubClientId!, config.GithubCodeExchangeUrl, forceDevice, launcher, ct, progress);
+            github, config.GithubClientId!, config.GithubCodeExchangeUrl, forceDevice, launcher, ct, progress);
 
         if (accessToken is null) return Stop("GitHub sign-in did not complete.", ct, AuthFailureReason.SigninDenied);
 
@@ -246,12 +240,12 @@ public sealed class OnboardingFacade(
     }
 
     async Task<AuthResult> LoginWorkOSAsync(
-            HttpClient http, AuthDiscoveryResponse config, bool forceDevice, LoginTarget target, CancellationToken ct) {
+            AuthDiscoveryResponse config, bool forceDevice, LoginTarget target, CancellationToken ct) {
         // No local browser any more: construction moved into OAuthLoginFlow.AcquireWorkOSAsync, which
         // is where the join collaborator is attached and where the instance is owned. One site instead
         // of three — see the ownership guard, which enumerates them.
         var authenticated = await OAuthLoginFlow.WorkOSTokensForServerAsync(
-            http, target.ServerUrl, config.ClientId!, config.OrganizationId, forceDevice, launcher,
+            workos, target.ServerUrl, config.ClientId!, config.OrganizationId, forceDevice, launcher,
             WorkOSBrowser, ct, progress,
             WorkOSApiBaseOverride ?? OAuthLoginFlow.WorkOSApiBase, KeyWatcher);
 
@@ -267,7 +261,7 @@ public sealed class OnboardingFacade(
             [new AuthIdentity(target.Profile, target.CanonicalServer)], provider, target.Profile, target.CanonicalServer,
             ConfigMutation: target.ConfigMutation,
             PublishTokens: async saved => {
-                await new TokenStore(root).SaveAsync(target.Profile, tokens, CancellationToken.None);
+                await store.SaveAsync(target.Profile, tokens, CancellationToken.None);
                 saved();
 
                 return username;
@@ -281,8 +275,7 @@ public sealed class OnboardingFacade(
         return result;
     }
 
-    async Task<AuthResult> DiscoverCoreAsync(HttpClient http, string provider, bool forceDevice, CancellationToken ct) {
-        var proxy       = new AuthProxyClient(http);
+    async Task<AuthResult> DiscoverCoreAsync(string provider, bool forceDevice, CancellationToken ct) {
         var proxyConfig = await proxy.GetConfigAsync(AuthProxyEndpoint.Url, ct);
 
         if (proxyConfig is null) {
@@ -290,14 +283,14 @@ public sealed class OnboardingFacade(
         }
 
         return provider switch {
-            AuthProvider.WorkOS    => await DiscoverWorkOSAsync(http, proxy, proxyConfig, forceDevice, ct),
-            AuthProvider.GitHubApp => await DiscoverGitHubAsync(http, proxy, proxyConfig, forceDevice, ct),
+            AuthProvider.WorkOS    => await DiscoverWorkOSAsync(proxyConfig, forceDevice, ct),
+            AuthProvider.GitHubApp => await DiscoverGitHubAsync(proxyConfig, forceDevice, ct),
             _                      => UnknownProvider(provider)
         };
     }
 
     async Task<AuthResult> DiscoverWorkOSAsync(
-            HttpClient http, IAuthProxyClient proxy, ProxyConfigResponse proxyConfig, bool forceDevice, CancellationToken ct) {
+            ProxyConfigResponse proxyConfig, bool forceDevice, CancellationToken ct) {
         var clientId = proxyConfig.WorkOSClientId ?? "";
 
         var flow = await WorkOSDiscovery.DiscoverAsync(
@@ -306,13 +299,12 @@ public sealed class OnboardingFacade(
                 ? WorkOSOrglessLogin(ct)
                 // Org-less: the sign-in picks the organization, and discovery reconciles it afterwards.
                 : OAuthLoginFlow.AcquireWorkOSAsync(
-                    http, clientId, organizationId: null, forceDevice, launcher, browser: null,
+                    workos, clientId, organizationId: null, forceDevice, launcher, browser: null,
                     apiBase: WorkOSApiBaseOverride ?? OAuthLoginFlow.WorkOSApiBase,
                     ct: ct, progress: progress, keys: KeyWatcher),
-            orgSwitch: (refreshToken, organizationId) => OAuthLoginFlow.SwitchWorkOSOrgAsync(
-                http, OAuthLoginFlow.WorkOSApiBase, clientId, refreshToken, organizationId, ct),
-            orglessRefresh: (refreshToken, refreshCt) => OAuthLoginFlow.RefreshWorkOSTokenAsync(
-                http, OAuthLoginFlow.WorkOSApiBase, clientId, refreshToken, refreshCt),
+            orgSwitch: (refreshToken, organizationId) =>
+                workos.SwitchOrganizationAsync(clientId, refreshToken, organizationId, ct),
+            orglessRefresh: (refreshToken, refreshCt) => workos.RefreshAsync(clientId, refreshToken, refreshCt),
             provisioner: provisioner,
             ct: ct,
             progress: progress,
@@ -324,7 +316,7 @@ public sealed class OnboardingFacade(
                 PickerVersion: proxyConfig.CliPickerVersion));
 
         return flow switch {
-            WorkOSDiscoveryFlow.Ready ready       => await WorkOSDiscovery.PublishAsync(root, ready, progress, beforeCommit, ct),
+            WorkOSDiscoveryFlow.Ready ready       => await WorkOSDiscovery.PublishAsync(root, store, ready, progress, beforeCommit, ct),
             WorkOSDiscoveryFlow.Retarget retarget => new AuthResult.Retarget(retarget.ServerInput),
             WorkOSDiscoveryFlow.Failed failed     => Stop(failed.Message, ct, failed.Reason),
             _                                     => Stop("No Capacitor tenants are linked to your account.", ct,
@@ -333,13 +325,13 @@ public sealed class OnboardingFacade(
     }
 
     async Task<AuthResult> DiscoverGitHubAsync(
-            HttpClient http, IAuthProxyClient proxy, ProxyConfigResponse proxyConfig, bool forceDevice, CancellationToken ct) {
+            ProxyConfigResponse proxyConfig, bool forceDevice, CancellationToken ct) {
         if (string.IsNullOrEmpty(proxyConfig.GitHubClientId)) {
             return Fail("Cannot reach the Kurrent auth service.", ct, AuthFailureReason.Unreachable);
         }
 
         var accessToken = await OAuthLoginFlow.AcquireGitHubTokenAsync(
-            http, proxyConfig.GitHubClientId, proxyConfig.GitHubCodeExchangeUrl, forceDevice, launcher,
+            github, proxyConfig.GitHubClientId, proxyConfig.GitHubCodeExchangeUrl, forceDevice, launcher,
             ct, progress);
 
         if (accessToken is null) return Stop("GitHub sign-in did not complete.", ct, AuthFailureReason.SigninDenied);
@@ -370,7 +362,7 @@ public sealed class OnboardingFacade(
             identities, AuthProvider.GitHubApp, picked.ProfileName,
             identities.First(i => i.Profile == picked.ProfileName).CanonicalServer,
             ConfigMutation: config => TenantDiscovery.MergeProfiles(config, outcome.Tenants, picked),
-            PublishTokens: saved => ExchangeEveryTenantAsync(http, outcome.Tenants, picked, accessToken, saved));
+            PublishTokens: saved => ExchangeEveryTenantAsync(outcome.Tenants, picked, accessToken, saved));
 
         return await CommitBoundary.CommitAsync(root, request, beforeCommit, progress, ct);
     }
@@ -378,7 +370,9 @@ public sealed class OnboardingFacade(
     // Inside the boundary: each tenant's exchange is network-then-save, and ANY failure — mapped or
     // thrown — costs that tenant its token (today's per-tenant warning) rather than the whole commit.
     async Task<string?> ExchangeEveryTenantAsync(
-            HttpClient http, DiscoveredTenant[] tenants, DiscoveredTenant picked, string githubAccessToken, Action saved) {
+            DiscoveredTenant[] tenants, DiscoveredTenant picked, string githubAccessToken, Action saved) {
+        using var http = httpFactory.CreateClient(CapacitorClients.Anonymous);
+
         string? pickedUsername = null;
 
         foreach (var tenant in tenants) {
@@ -393,7 +387,7 @@ public sealed class OnboardingFacade(
                     continue;
                 }
 
-                await new TokenStore(root).SaveAsync(tenant.ProfileName, exchanged.Value.Tokens, CancellationToken.None);
+                await store.SaveAsync(tenant.ProfileName, exchanged.Value.Tokens, CancellationToken.None);
                 saved();
 
                 if (tenant.ProfileName == picked.ProfileName) pickedUsername = exchanged.Value.Username;

@@ -101,7 +101,7 @@ public class RoutedPrivatizeMembershipTests : IDisposable {
             .RespondWith(Response.Create().WithStatusCode(500));
 
         var stdout = await CaptureStdoutAsync(async () => {
-            await new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home).HandleImport(
+            await new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home, new FixedCapacitorHttpClient()).HandleImport(
                 filterCwd: null,
                 minLines: 0,
                 sources: [new ChildContentOutsidePrivateScopeSource()],
@@ -122,7 +122,7 @@ public class RoutedPrivatizeMembershipTests : IDisposable {
 
         var exitCode = 0;
         var stdout = await CaptureStdoutAsync(async () => {
-            exitCode = await new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home).HandleImport(
+            exitCode = await new ImportCommand(Config.Root, Resolutions.At(_server.Url!, Config.Root), Home, new FixedCapacitorHttpClient()).HandleImport(
                 filterCwd: null,
                 minLines: 0,
                 sources: [new ChildContentOutsidePrivateScopeSource()],

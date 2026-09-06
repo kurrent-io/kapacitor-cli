@@ -1,6 +1,4 @@
 using System.Reflection;
-using System.Text;
-using System.Text.Json.Nodes;
 using Capacitor.Cli;
 using Capacitor.Cli.Commands;
 using Capacitor.Cli.Commands.Harness;
@@ -11,6 +9,8 @@ using Capacitor.Cli.Core.FirstRun;
 using Capacitor.Cli.Core.Harness;
 using Capacitor.Cli.Core.Telemetry;
 using Capacitor.Cli.Harness.Claude;
+using Capacitor.Cli.Core.Http;
+using Microsoft.Extensions.DependencyInjection;
 using ReviewCommand = Capacitor.Cli.Commands.ReviewCommand;
 using WatchCommand = Capacitor.Cli.Commands.WatchCommand;
 
@@ -91,20 +91,38 @@ if (isHook && args.Contains("--claude")) {
     }
 }
 
-// Agent-spawned commands owe an output contract, or must leave no orphaned child, so an unusable
-// server URL must not kill them mid-contract — EnsureAbsolute throws for them instead of exiting.
-// Interactive commands keep exiting 2 with the actionable hint, which is the right UX with a user
-// present. This covers the agent-spawned population only; it is not a claim that every reachable
-// URL consumer has been enumerated, and the explicit guards own what actually happens.
-ProcessUrlPolicy.Current = CrashReporter.IsFailOpenCommand(command)
-    ? UrlFailurePolicy.Throw
-    : UrlFailurePolicy.FailFast;
-
 // KCAP_DAEMONS_DIR is dead to the process from this line on.
 var daemonPaths = DaemonStore.FromEnvironment();
 
 var profiles = await AppConfig.ResolveForRepo(args, config, gitTimeoutMs: isHook ? 1000 : 5000);
 var baseUrl  = profiles.Resolution.ServerUrl;
+
+// Composition root. Every context resolved above is registered once here; the dispatch switch below
+// asks for a command rather than handing each one its arguments.
+var services = new ServiceCollection()
+    .AddCapacitorContext(config, home, daemonPaths, profiles)
+    .AddCapacitorCommands();
+
+services.AddSingleton(clock);
+services.AddSingleton<IBrowserLauncher>(SystemBrowser.Instance);
+
+// Both probe the filesystem, and only a handful of commands take either, so they stay factories:
+// resolving a command that wants neither must not pay for them.
+services.AddSingleton(sp => HarnessRegistry.FromEnvironment(sp.GetRequiredService<UserHome>()));
+services.AddSingleton(sp => PluginEnvironment.FromProcess(
+        sp.GetRequiredService<ProfileContext>().Snapshot,
+        sp.GetRequiredService<UserHome>()));
+
+// A factory, so a command that never speaks HTTP does not pay for a server URL it may not even have:
+// `baseUrl` is null until a profile resolves one.
+services.AddSingleton(_ => new CapacitorServer(baseUrl, config, profiles));
+services.AddCapacitorHttp();
+
+await using var sp = services.BuildServiceProvider();
+
+TCommand Run<TCommand>() where TCommand : notnull => sp.GetRequiredService<TCommand>();
+
+ISessionsApi Api() => sp.GetRequiredService<ISessionsApi>();
 
 // Telemetry: initialised once the server URL is known (it decides the `organization` group) and
 // torn down from ProcessExit, which observes the exit code returned by top-level Main. Every
@@ -123,7 +141,7 @@ var commandStart = System.Diagnostics.Stopwatch.GetTimestamp();
 // itself for them regardless — so the disk read has no consumer and is worth skipping outright.
 var loggedIn = false;
 if (CommandEvents.IsReportable(command)) {
-    try { loggedIn = await new TokenStore(config).LoadForProfileAsync(profiles.Name) is not null; } catch { }
+    try { loggedIn = await sp.GetRequiredService<TokenStore>().LoadForProfileAsync(profiles.Name) is not null; } catch { }
 }
 
 // `kcap config set telemetry off` must never activate telemetry for the very invocation that
@@ -224,7 +242,7 @@ switch (command) {
             return 1;
         }
 
-        return await new ErrorsCommand(config, profiles).HandleErrors(errSessionId, useChain);
+        return await Run<ErrorsCommand>().HandleErrors(errSessionId, useChain);
     }
     case "recap": {
         var useChain   = args.Contains("--chain");
@@ -234,7 +252,7 @@ switch (command) {
         var useGetTurn = args.Contains("--get-turn");
 
         if (useRepo) {
-            return await new RecapCommand(config, profiles).HandleRepoRecap();
+            return await Run<RecapCommand>().HandleRepoRecap();
         }
 
         // --get-turn takes a value (the turn index), so declare it as a value flag
@@ -251,7 +269,7 @@ switch (command) {
         }
 
         if (usePerTurn) {
-            return await new RecapCommand(config, profiles).HandlePerTurnRecap(recapSessionId);
+            return await Run<RecapCommand>().HandlePerTurnRecap(recapSessionId);
         }
 
         if (useGetTurn) {
@@ -266,13 +284,13 @@ switch (command) {
                 return 1;
             }
 
-            return await new RecapCommand(config, profiles).HandleGetTurn(recapSessionId, turnIndex);
+            return await Run<RecapCommand>().HandleGetTurn(recapSessionId, turnIndex);
         }
 
-        return await new RecapCommand(config, profiles).HandleRecap(recapSessionId, useChain, useFull);
+        return await Run<RecapCommand>().HandleRecap(recapSessionId, useChain, useFull);
     }
     case "sessions":
-        return await new SessionsCommand(config, profiles).HandleAsync(args);
+        return await Run<SessionsCommand>().HandleAsync(args);
     case "validate-plan": {
         var vpSessionId = ResolveSessionId(args);
 
@@ -283,14 +301,14 @@ switch (command) {
             return 1;
         }
 
-        return await new ValidatePlanCommand(config, profiles).Handle(vpSessionId);
+        return await Run<ValidatePlanCommand>().Handle(vpSessionId);
     }
     case "feedback":
-        return await new FeedbackCommand(config, profiles).HandleAsync(args);
+        return await Run<FeedbackCommand>().HandleAsync(args);
     case "eval": {
         // --list-questions is a standalone sub-action; short-circuit.
         if (args.Contains("--list-questions")) {
-            return await new EvalCommand(config, profiles, home).HandleListQuestions();
+            return await Run<EvalCommand>().HandleListQuestions();
         }
 
         var evalSessionId = ResolveSessionId(args, valueFlags: ["--model", "--threshold", "--questions", "--skip"]);
@@ -322,7 +340,7 @@ switch (command) {
             }
         }
 
-        return await new EvalCommand(config, profiles, home).HandleEval(
+        return await Run<EvalCommand>().HandleEval(
             evalSessionId, evalModel, evalChain, evalThreshold,
             evalQuestions, evalSkip
         );
@@ -335,47 +353,46 @@ switch (command) {
         var wdSessionId = args[1].Replace("-", "");
         var wdVendor    = args.Contains("--codex") ? "codex" : "claude";
 
-        return await new WhatsDoneCommand(config, profiles, home).HandleGenerateWhatsDone(baseUrl!, wdSessionId, wdVendor);
+        return await Run<WhatsDoneCommand>().HandleGenerateWhatsDone(baseUrl!, wdSessionId, wdVendor);
     }
     case "login":
-        return await new LoginCommand(config, profiles, SystemBrowser.Instance).HandleAsync(args, baseUrl);
+        return await Run<LoginCommand>().HandleAsync(args, baseUrl);
     case "logout": {
-        await new TokenStore(config).DeleteAsync();
+        await sp.GetRequiredService<TokenStore>().DeleteAsync();
         await Console.Out.WriteLineAsync("Logged out.");
 
         return 0;
     }
     case "whoami":
-        return await new WhoamiCommand(config, profiles).HandleAsync();
+        return await Run<WhoamiCommand>().HandleAsync();
     case "daemon":
-        return await new DaemonCommands(daemonPaths, config, profiles, home).HandleAsync(args);
+        return await Run<DaemonCommands>().HandleAsync(args);
     case "agent":
-        return await new AgentCommand(daemonPaths, config, profiles, home).HandleAsync(args, baseUrl);
+        return await Run<AgentCommand>().HandleAsync(args, baseUrl);
     case "setup":
-        return await new SetupCommand(config, profiles, SystemBrowser.Instance, home).HandleAsync(args);
+        return await Run<SetupCommand>().HandleAsync(args);
     case "plugin":
-        return await new PluginCommand(PluginEnvironment.FromProcess(profiles.Snapshot, home)).HandleAsync(args);
+        return await Run<PluginCommand>().HandleAsync(args);
     case "profile":
-        return await new ProfileCommand(config).HandleAsync(args);
+        return await Run<ProfileCommand>().HandleAsync(args);
     case "machine":
-        return await new MachineCommand(config, profiles).HandleAsync(args);
+        return await Run<MachineCommand>().HandleAsync(args);
     case "use":
-        return await new UseCommand(config).HandleAsync(args);
+        return await Run<UseCommand>().HandleAsync(args);
     case "status":
-        return await new StatusCommand(
-            daemonPaths, profiles, config, HarnessRegistry.FromEnvironment(home)).HandleAsync(args);
+        return await Run<StatusCommand>().HandleAsync(args);
     case "harness":
-        return await new HarnessCommand(config, HarnessRegistry.FromEnvironment(home)).HandleAsync(args);
+        return await Run<HarnessCommand>().HandleAsync(args);
     case "config":
-        return await new ConfigCommand(config).HandleAsync(args);
+        return await Run<ConfigCommand>().HandleAsync(args);
     case "ignore":
-        return await new IgnoreCommand(config, profiles, home).HandleAsync(args);
+        return await Run<IgnoreCommand>().HandleAsync(args);
     case "remap":
-        return await new RemapCommand(config).HandleAsync(args);
+        return await Run<RemapCommand>().HandleAsync(args);
     case "repos":
-        return await new ReposCommand(config).HandleAsync(args);
+        return await Run<ReposCommand>().HandleAsync(args);
     case "projects":
-        return await new ProjectsCommand(config, profiles).HandleList();
+        return await Run<ProjectsCommand>().HandleList();
     case "project": {
         if (args.Length < 2) {
             Console.Error.WriteLine("Usage: kcap project <slug>");
@@ -383,10 +400,10 @@ switch (command) {
             return 1;
         }
 
-        return await new ProjectsCommand(config, profiles).HandleDetail(args[1]);
+        return await Run<ProjectsCommand>().HandleDetail(args[1]);
     }
     case "update":
-        return await new UpdateCommand(config, profiles).HandleAsync(args);
+        return await Run<UpdateCommand>().HandleAsync(args);
     case "review": {
         if (args.Length < 2) {
             Console.Error.WriteLine("Usage: kcap review <pr-url-or-shorthand>");
@@ -396,7 +413,7 @@ switch (command) {
             return 1;
         }
 
-        return await new ReviewCommand(config, profiles).HandleReview(args[1]);
+        return await Run<ReviewCommand>().HandleReview(args[1]);
     }
     case "mcp": {
         if (args.Length < 2) {
@@ -421,11 +438,11 @@ switch (command) {
 
                 // Explicit PR args — use directly
                 if (mcpOwner is not null && mcpRepo is not null && mcpPr is not null && int.TryParse(mcpPr, out var mcpPrNum)) {
-                    return await new McpReviewServer(config, profiles).RunAsync(mcpOwner, mcpRepo, mcpPrNum);
+                    return await Run<McpReviewServer>().RunAsync(mcpOwner, mcpRepo, mcpPrNum);
                 }
 
                 // No args — auto-detect from git
-                return await new McpReviewServer(config, profiles).RunAutoAsync();
+                return await Run<McpReviewServer>().RunAutoAsync();
             }
             case "judge": {
                 var session = GetArg(args, "--session");
@@ -436,20 +453,20 @@ switch (command) {
                     return 1;
                 }
 
-                return await new McpJudgeServer(config, profiles).RunAsync(session);
+                return await Run<McpJudgeServer>().RunAsync(session);
             }
             case "sessions":
-                return await new McpSessionsServer(config, profiles).RunAsync();
+                return await Run<McpSessionsServer>().RunAsync();
             case "flows":
-                return await new McpFlowsServer(config, profiles).RunAsync(GetArg(args, "--driver"));
+                return await Run<McpFlowsServer>().RunAsync(GetArg(args, "--driver"));
             case "flow-result":
-                return await new McpFlowResultServer(config, profiles).RunAsync();
+                return await Run<McpFlowResultServer>().RunAsync();
             case "memory":
-                return await new McpMemoryServer(config, profiles).RunAsync();
+                return await Run<McpMemoryServer>().RunAsync();
             case "workitems":
-                return await new McpWorkItemsServer(config, profiles).RunAsync();
+                return await Run<McpWorkItemsServer>().RunAsync();
             case "analytics":
-                return await new McpAnalyticsServer(config, profiles).RunAsync();
+                return await Run<McpAnalyticsServer>().RunAsync();
             default:
                 Console.Error.WriteLine($"Unknown mcp subcommand: {args[1]}");
 
@@ -469,7 +486,7 @@ switch (command) {
             Console.SetOut(TextWriter.Null);
             Console.SetError(TextWriter.Null);
         }
-        return await new SkillsCommand(config, profiles, home).HandleSync(args.Contains("--dry-run"), skillsAuto);
+        return await Run<SkillsCommand>().HandleSync(args.Contains("--dry-run"), skillsAuto);
     }
     case "curate": {
         if (args.Length < 2) {
@@ -480,7 +497,7 @@ switch (command) {
             case "apply": {
                 var dryRun = args.Contains("--dry-run");
                 var yes    = args.Contains("--yes") || args.Contains("-y");
-                return await new CurateCommand(config, profiles).HandleApply(dryRun, yes);
+                return await Run<CurateCommand>().HandleApply(dryRun, yes);
             }
             default:
                 Console.Error.WriteLine($"Unknown curate subcommand: {args[1]}");
@@ -489,9 +506,9 @@ switch (command) {
         }
     }
     case "cleanup":
-        return await new CleanupCommand(config, profiles).HandleCleanup();
+        return await Run<CleanupCommand>().HandleCleanup();
     case "uninstall":
-        return await new UninstallCommand(daemonPaths, config, profiles, home).HandleAsync(args);
+        return await Run<UninstallCommand>().HandleAsync(args);
     case "disable": {
         // The sessionId is consumed as a filesystem path component
         // (watcher PID files, disabled marker file). Validate strictly as a
@@ -513,7 +530,7 @@ switch (command) {
         }
 
         // 1. Kill the watcher (and any subagent watchers)
-        var watchers = new WatcherManager(config, profiles);
+        var watchers = new WatcherManager(config, profiles, sp.GetRequiredService<ICapacitorHttpClient>());
         await watchers.KillWatcher(sessionId);
 
         // Also kill subagent watchers — scan PID files matching "{sessionId}-*"
@@ -530,24 +547,23 @@ switch (command) {
         DisabledSessions.Mark(sessionId, config);
 
         // 3. Tell server to delete session data
-        using var disableClient = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl!);
-
         try {
-            var resp = await disableClient.DeleteWithRetryAsync($"{baseUrl!}/api/sessions/{sessionId}");
+            switch (await Api().DeleteSessionAsync(sessionId)) {
+                case DeleteSessionResponse.Deleted:
+                    await Console.Out.WriteLineAsync($"Session {sessionId} disabled. Recording stopped and server data deleted.");
 
-            if (resp.IsSuccessStatusCode) {
-                await Console.Out.WriteLineAsync($"Session {sessionId} disabled. Recording stopped and server data deleted.");
-            } else if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) {
-                await Console.Out.WriteLineAsync($"Session {sessionId} disabled. No server data found (may have already been deleted).");
-            } else if (await HttpClientExtensions.HandleUnauthorizedAsync(resp)) {
-                return 1;
-            } else {
-                Console.Error.WriteLine($"Server returned HTTP {(int)resp.StatusCode}");
+                    break;
+                case DeleteSessionResponse.NotFound:
+                    await Console.Out.WriteLineAsync($"Session {sessionId} disabled. No server data found (may have already been deleted).");
 
-                return 1;
+                    break;
             }
-        } catch (HttpRequestException ex) {
-            HttpClientExtensions.WriteUnreachableError(baseUrl!, ex);
+        } catch (CapacitorApiException ex) {
+            Console.Error.WriteLine(ex.Message);
+
+            // Local state has already changed, so a server that was never reached is not a failure.
+            if (ex.Status is not null) return 1;
+
             await Console.Out.WriteLineAsync("Session disabled locally (watcher stopped, hooks silenced). Server data not deleted.");
         }
 
@@ -573,24 +589,11 @@ switch (command) {
             return 1;
         }
 
-        using var hideClient = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl!);
-        var       visPayload = new JsonObject { ["visibility"] = "none" };
-        using var visContent = new StringContent(visPayload.ToJsonString(), Encoding.UTF8, "application/json");
-
         try {
-            var resp = await hideClient.PutWithRetryAsync($"{baseUrl!}/api/sessions/{sessionId}/visibility", visContent);
-
-            if (resp.IsSuccessStatusCode) {
-                await Console.Out.WriteLineAsync($"Session {sessionId} hidden (owner-only).");
-            } else if (await HttpClientExtensions.HandleUnauthorizedAsync(resp)) {
-                return 1;
-            } else {
-                Console.Error.WriteLine($"Server returned HTTP {(int)resp.StatusCode}");
-
-                return 1;
-            }
-        } catch (HttpRequestException ex) {
-            HttpClientExtensions.WriteUnreachableError(baseUrl!, ex);
+            await Api().HideSessionAsync(sessionId);
+            await Console.Out.WriteLineAsync($"Session {sessionId} hidden (owner-only).");
+        } catch (CapacitorApiException ex) {
+            Console.Error.WriteLine(ex.Message);
 
             return 1;
         }
@@ -681,7 +684,7 @@ switch (command) {
             return 1;
         }
 
-        return await new ImportCommand(config, profiles, home).HandleImport(
+        return await Run<ImportCommand>().HandleImport(
             filterCwd,
             filterSession,
             minLines,
@@ -732,7 +735,7 @@ switch (command) {
 
         var watchVendor = GetArg(args, "--vendor") ?? "claude";
 
-        return await new WatchCommand(config, profiles, home).RunWatch(
+        return await Run<WatchCommand>().RunWatch(
             watchSessionId, watchPath, watchAgentId, watchCwd,
             watchSkipTitle, parentPid, watchVendor
         );
@@ -748,7 +751,7 @@ switch (command) {
         var cfSessionId = args[1].Replace("-", "");
         var cfPath      = args[2];
 
-        return await new CopilotFinalizeDrainCommand(config, profiles).Run(cfSessionId, cfPath);
+        return await Run<CopilotFinalizeDrainCommand>().Run(cfSessionId, cfPath);
     }
     case "set-title" when args.Length < 2:
         Console.Error.WriteLine("Usage: kcap set-title <title>");
@@ -778,20 +781,10 @@ switch (command) {
             title = title[..120];
         }
 
-        using var stClient  = await HttpClientExtensions.CreateAuthenticatedClientAsync(config, profiles, baseUrl!);
-        var       payload   = new JsonObject { ["session_id"] = stSessionId, ["title"] = title };
-        using var stContent = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
-
         try {
-            var resp = await stClient.PostWithRetryAsync($"{baseUrl!}/hooks/set-title", stContent);
-
-            if (!resp.IsSuccessStatusCode) {
-                Console.Error.WriteLine($"Server returned HTTP {(int)resp.StatusCode}");
-
-                return 1;
-            }
-        } catch (HttpRequestException ex) {
-            HttpClientExtensions.WriteUnreachableError(baseUrl!, ex);
+            await Api().SetSessionTitleAsync(stSessionId, title);
+        } catch (CapacitorApiException ex) {
+            Console.Error.WriteLine(ex.Message);
 
             return 1;
         }
@@ -804,7 +797,7 @@ switch (command) {
     // generate-whats-done/set-title/copilot-finalize, nobody types this by hand. See
     // ReportVersionCommand for why it never surfaces an error.
     case "report-version":
-        return await new ReportVersionCommand(config, profiles).HandleAsync();
+        return await Run<ReportVersionCommand>().HandleAsync();
     case "hook": {
         // Task 12: global, session-agnostic drain pass run early in EVERY non-Codex hook
         // invocation — centralizes the per-vendor AgentHookPoster.DrainSpoolsAsync calls Tasks 4-6
@@ -818,37 +811,37 @@ switch (command) {
         // spools BEFORE returning. Gating the call would mean a config broken for weeks never reaps
         // anything, and the per-session cap does not bound the number of stale files.
         if (!args.Contains("--codex") && baseUrl is not null) {
-            await new AgentHookPoster(config, profiles).DrainSpoolsAsync(
+            await new AgentHookPoster(config, profiles, sp.GetRequiredService<ICapacitorHttpClient>()).DrainSpoolsAsync(
                 new HookSpool(config),
                 new TranscriptSpool(config),
                 sessionId: null); // current session unknown here — reading stdin now would consume it
         }
         if (args.Contains("--claude")) {
-            return await new ClaudeHookCommand(config, profiles, clock, home).Handle(new StringReader(claudeHookBody!));
+            return await Run<ClaudeHookCommand>().Handle(new StringReader(claudeHookBody!));
         }
         if (args.Contains("--codex")) {
-            return await new CodexHookCommand(config, profiles, clock, home).Handle(Console.In);
+            return await Run<CodexHookCommand>().Handle(Console.In);
         }
         if (args.Contains("--cursor")) {
-            return await new CursorHookCommand(config, profiles, clock, home).Handle(Console.In);
+            return await Run<CursorHookCommand>().Handle(Console.In);
         }
         if (args.Contains("--copilot")) {
-            return await new CopilotHookCommand(config, profiles, clock, home).Handle(Console.In, args);
+            return await Run<CopilotHookCommand>().Handle(Console.In, args);
         }
         if (args.Contains("--gemini")) {
-            return await new GeminiHookCommand(config, profiles, clock, home).Handle(Console.In);
+            return await Run<GeminiHookCommand>().Handle(Console.In);
         }
         if (args.Contains("--kiro")) {
-            return await new KiroHookCommand(config, profiles, clock, home).Handle(Console.In, args);
+            return await Run<KiroHookCommand>().Handle(Console.In, args);
         }
         if (args.Contains("--pi")) {
-            return await new PiHookCommand(config, profiles, clock, home).Handle(args, Console.Out);
+            return await Run<PiHookCommand>().Handle(args, Console.Out);
         }
         if (args.Contains("--opencode")) {
-            return await new OpenCodeHookCommand(config, profiles, clock, home).Handle(args);
+            return await Run<OpenCodeHookCommand>().Handle(args);
         }
         if (args.Contains("--antigravity")) {
-            return await new AntigravityHookCommand(config, profiles, clock, home).Handle(args);
+            return await Run<AntigravityHookCommand>().Handle(args);
         }
         Console.Error.WriteLine("kcap hook requires a vendor flag (for example --claude)");
         Console.Error.WriteLine("Supported vendors: --claude, --codex, --cursor, --copilot, --gemini, --kiro, --pi, --opencode, --antigravity");
@@ -868,6 +861,15 @@ switch (command) {
 Console.Error.WriteLine($"Unknown command: {command}");
 
 return 1;
+} catch (UnusableServerUrlException ex) {
+    // Returned, not exited: every finally, the telemetry flush and each vendor's fail-open catch
+    // still run. Not a crash either — the repair is a config edit, so a crash report would file a
+    // bug against the user's own settings.
+    Console.Error.WriteLine(ex.Message);
+
+    // A fail-open command's exit code is read by the harness as its verdict — Gemini maps anything
+    // outside 0 and 1 to a blocked session — so a misconfigured URL must not be what blocks one.
+    return CrashReporter.IsFailOpenCommand(command) ? 0 : 2;
 } catch (Exception topLevelEx) {
     CrashReporter.Record(config, command, topLevelEx);
 
@@ -875,7 +877,7 @@ return 1;
 }
 
 } finally {
-    await UpdateNotice.FlushAsync(command, args, profiles, config);
+    await UpdateNotice.FlushAsync(command, args, profiles, config, Run<NpmRegistryClient>);
     await HarnessSetupNotice.FlushAsync(command, config, profiles, home);
 }
 

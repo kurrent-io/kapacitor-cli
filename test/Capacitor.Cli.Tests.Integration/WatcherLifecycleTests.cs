@@ -18,7 +18,7 @@ public class WatcherLifecycleTests {
 
     // One manager over that root and a resolution naming the URL these spawns target — the same two
     // values production hands it, so nothing here can point a watcher at a second server.
-    static readonly WatcherManager Watchers = new(Root, Resolutions.At("http://localhost:0", Root));
+    static readonly WatcherManager Watchers = new(Root, Resolutions.At("http://localhost:0", Root), new FixedCapacitorHttpClient());
 
     [Before(Class)]
     public static void SetUp() {

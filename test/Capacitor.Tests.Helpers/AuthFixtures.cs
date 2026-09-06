@@ -1,5 +1,6 @@
 using Capacitor.Cli.Core;
 using Capacitor.Cli.Core.Auth;
+using Capacitor.Cli.Core.Http;
 using Duende.IdentityModel.OidcClient.Browser;
 using NSubstitute;
 
@@ -8,6 +9,17 @@ namespace Capacitor.Tests.Helpers;
 // Shared by the Core façade tests and the CLI login/setup parity tests, which sit in different
 // assemblies and so cannot reach a fixture declared in either one.
 public static class AuthFixtures {
+    /// <summary>
+    /// A real <see cref="TokenStore"/> over unconfigured clients — the one construction site for a
+    /// constructor the suites reach from eighty-odd files. A test that scripts what the refresh lanes
+    /// answer passes a handler.
+    /// </summary>
+    public static TokenStore NewTokenStore(ConfigRoot root, HttpMessageHandler? handler = null) {
+        var factory = new PlainHttpClientFactory(handler);
+
+        return new TokenStore(root, factory, new WorkOSClient(factory));
+    }
+
     public static OnboardingFacade NewFacade(
             ConfigRoot                                                  root,
             IAuthProgress                                               progress,
@@ -19,11 +31,14 @@ public static class AuthFixtures {
             IBrowser?                                                   workosBrowser = null,
             string?                                                     workosApiBase = null,
             IBrowserLauncher?                                           browser       = null) {
-        var http = new HttpClient(handler, disposeHandler: false);
+        var factory = new PlainHttpClientFactory(handler);
 
         return new OnboardingFacade(
-                root, progress, browser ?? new RecordingBrowser(),
-                picker ?? Substitute.For<ITenantPicker>(), provisioner, beforeCommit, () => http) {
+                root, NewTokenStore(root), factory,
+                new AuthProxyClient(factory.CreateClient(CapacitorClients.Anonymous)),
+                new GitHubOAuthClient(factory), new WorkOSClient(factory),
+                progress, browser ?? new RecordingBrowser(),
+                picker ?? Substitute.For<ITenantPicker>(), provisioner, beforeCommit) {
             WorkOSOrglessLogin    = workosLogin,
             WorkOSBrowser         = workosBrowser,
             WorkOSApiBaseOverride = workosApiBase

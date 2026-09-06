@@ -11,6 +11,9 @@ namespace Capacitor.Cli.Tests.Unit.SessionStartMemory;
 /// orchestrator/lease/policy are covered by SessionStartMemoryFoundationTests.
 /// </summary>
 public class GuidelinesLaneAndCompositeTests {
+    /// The lanes resolve their client inside the fetch, so a test hands them one already built.
+    static Func<CancellationToken, Task<HttpClient>> Lazy(HttpClient client) => _ => Task.FromResult(client);
+
     const string Marker = "<!-- kcap-memory-index:v1 -->";
 
     const string MemoryBody =
@@ -23,7 +26,7 @@ public class GuidelinesLaneAndCompositeTests {
             GuidelinesDisabled: guidelinesDisabled);
 
     static SessionStartGuidelinesLane Lane(HttpStatusCode status, string body, TimeSpan? retryAfter = null) =>
-        new((_, _) => Task.FromResult(new HttpClient(new Handler(status, body, retryAfter))));
+        new(Lazy(new HttpClient(new Handler(status, body, retryAfter))));
 
     // ---- Guidelines lane ----
 
@@ -77,7 +80,7 @@ public class GuidelinesLaneAndCompositeTests {
     [Test]
     public async Task Null_repo_scope_skips_fetch() {
         var handler = new Handler(HttpStatusCode.OK, GuidelinesBody);
-        var lane    = new SessionStartGuidelinesLane((_, _) => Task.FromResult(new HttpClient(handler)));
+        var lane    = new SessionStartGuidelinesLane(Lazy(new HttpClient(handler)));
 
         var result = await lane.FetchWithScopeAsync(
             new SessionStartMemoryScope(null, "machine"), Req(), CancellationToken.None);
@@ -89,7 +92,7 @@ public class GuidelinesLaneAndCompositeTests {
     [Test]
     public async Task Builds_repo_scoped_url() {
         var handler = new Handler(HttpStatusCode.NoContent, "");
-        var lane    = new SessionStartGuidelinesLane((_, _) => Task.FromResult(new HttpClient(handler)));
+        var lane    = new SessionStartGuidelinesLane(Lazy(new HttpClient(handler)));
 
         await lane.FetchWithScopeAsync(new SessionStartMemoryScope("deadbeef01", null), Req(), CancellationToken.None);
 
@@ -105,8 +108,8 @@ public class GuidelinesLaneAndCompositeTests {
         var scope    = new FixedScope("repo", "machine");
         var memH     = memoryHandler ?? new Handler(memory.status, memory.body, memory.retryAfter);
         var guideH   = guidelinesHandler ?? new Handler(guidelines.status, guidelines.body, guidelines.retryAfter);
-        var memory2  = new SessionStartMemoryContextProvider(scope, (_, _) => Task.FromResult(new HttpClient(memH)));
-        var guide2   = new SessionStartGuidelinesLane((_, _) => Task.FromResult(new HttpClient(guideH)));
+        var memory2  = new SessionStartMemoryContextProvider(scope, Lazy(new HttpClient(memH)));
+        var guide2   = new SessionStartGuidelinesLane(Lazy(new HttpClient(guideH)));
         return new SessionStartCompositeContextProvider(scope, memory2, guide2);
     }
 

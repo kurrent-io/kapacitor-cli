@@ -761,9 +761,8 @@ public class McpFlowsServerTests : IDisposable {
     }
 
     /// <summary>
-    /// A scheme-less server_url would otherwise reach EnsureAbsolute inside the lazy auth-client
-    /// factory and hard-exit the process (Environment.Exit(2)) mid-request. The startup URL
-    /// guard turns it into a graceful JSON-RPC tool error, and the server keeps serving.
+    /// A scheme-less server_url is refused before dispatch, so a tool call returns a graceful
+    /// JSON-RPC tool error and the server keeps serving.
     /// </summary>
     [Test]
     public async Task Tool_call_with_invalid_server_url_returns_error_and_server_survives() {
@@ -1464,9 +1463,8 @@ public class McpFlowsServerTests : IDisposable {
     }
 
     /// <summary>
-    /// Writes a non-expired token to the per-test config dir's token store so the
-    /// CLI's <c>HttpClientExtensions.CreateAuthenticatedClientAsync</c> attaches a
-    /// Bearer header. Exercises the long-lived-server path (the MCP server holds a
+    /// Writes a non-expired token to the per-test config dir's token store so the send path
+    /// attaches a Bearer header. Exercises the long-lived-server path (the MCP server holds a
     /// single HttpClient for the agent's whole session).
     /// </summary>
     void SeedToken(string accessToken = "seed-token") {

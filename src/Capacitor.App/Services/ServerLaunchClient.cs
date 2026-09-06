@@ -1,5 +1,4 @@
 using System.Net;
-using Capacitor.Cli.Core;
 using Capacitor.Cli.Core.Auth;
 using Capacitor.Cli.Core.Config;
 using Microsoft.AspNetCore.SignalR.Client;
@@ -10,7 +9,7 @@ namespace Capacitor.App.Services;
 /// Opens the hub connection lazily on first launch and reuses it. URL suffix and access-token
 /// provider mirror the daemon's own ServerConnection (same server, same auth) so the two never
 /// drift onto separate conventions.
-public sealed class ServerLaunchClient(ConfigRoot config, ProfileContext? profiles) : ILaunchClient, IAsyncDisposable {
+public sealed class ServerLaunchClient(ProfileContext? profiles, TokenStore tokenStore) : ILaunchClient, IAsyncDisposable {
     readonly SemaphoreSlim _gate = new(1, 1);
     HubConnection? _hub;
 
@@ -60,7 +59,7 @@ public sealed class ServerLaunchClient(ConfigRoot config, ProfileContext? profil
                 $"{resolved.TrimEnd('/')}/hubs/sessions",
                 options => {
                     options.AccessTokenProvider = async () => {
-                        var resolution = await new TokenStore(config).GetValidTokensForServerAsync(profiles!.Name, resolved);
+                        var resolution = await tokenStore.GetValidTokensForServerAsync(profiles!.Name, resolved);
                         return resolution.Tokens?.AccessToken;
                     };
                 }

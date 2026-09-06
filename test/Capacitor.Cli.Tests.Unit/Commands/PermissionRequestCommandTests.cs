@@ -1,4 +1,7 @@
+using System.Net;
+using System.Text;
 using Capacitor.Cli.Commands;
+using Capacitor.Cli.Core;
 
 namespace Capacitor.Cli.Tests.Unit.Commands;
 
@@ -8,6 +11,8 @@ namespace Capacitor.Cli.Tests.Unit.Commands;
 [NotInParallel]
 public class PermissionRequestCommandTests {
     const string EnvVar = "KCAP_DAEMON_URL";
+
+    [TempConfigRoot] public required TempConfigRoot Config { get; init; }
 
     [Test]
     public async Task ReturnsFalseWhenEnvVarIsUnset() {
@@ -94,5 +99,71 @@ public class PermissionRequestCommandTests {
         var withoutAgent = PermissionRequestCommand.BuildBridgePayload(node, "abc", null);
         await Assert.That(withoutAgent["agent_id"]).IsNull();
         await Assert.That(withoutAgent["cwd"]!.GetValue<string>()).IsEqualTo("/repo");
+    }
+
+    sealed class Accepting : HttpMessageHandler {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) {
+                Content = new StringContent("""{"behavior":"allow"}""", Encoding.UTF8, "application/json")
+            });
+    }
+
+    /// <summary>
+    /// The bridge post carries the raw tool input to an address the daemon minted, so it must draw the
+    /// lane that ignores an ambient proxy — the agent's own environment supplies one often enough, and
+    /// a proxied hop would take the payload off the machine.
+    /// </summary>
+    [Test]
+    public async Task The_bridge_post_draws_the_loopback_lane() {
+        using var bridgeUrl = EnvScope.Exclusive(EnvVar, "http://127.0.0.1:51234/bridge");
+        // The bridge is the rendered agent's route; a terminal one records the event and never posts.
+        using var rendered  = EnvScope.Exclusive("KCAP_RENDERED_AGENT", "1");
+        using var handler   = new Accepting();
+        var       http      = new RecordingCapacitorHttpClient(handler);
+
+        var command = new PermissionRequestCommand(
+            Config.Root, Resolutions.None(Config.Root), http);
+
+        await using var stdout = new StringWriter();
+
+        var exit = await command.Handle(
+            """{"session_id":"s1","tool_name":"Bash","tool_input":{"command":"ls"}}""",
+            selfHealWatcher: false, stdout);
+
+        await Assert.That(exit).IsEqualTo(0);
+        await Assert.That(http.Lanes).IsEquivalentTo(new[] { "Loopback" });
+    }
+
+    sealed class Counting : HttpMessageHandler {
+        public int Requests;
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) {
+            Interlocked.Increment(ref Requests);
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
+        }
+    }
+
+    /// <summary>
+    /// Recording is best-effort and the credential is gone, so the POST could only earn a 401 — and
+    /// this hook is holding up the approval prompt while it waits for one.
+    /// </summary>
+    [Test]
+    public async Task A_lapsed_credential_records_nothing() {
+        using var noBridge = EnvScope.Exclusive(EnvVar, null);
+        using var terminal = EnvScope.Exclusive("KCAP_RENDERED_AGENT", null);
+        using var handler  = new Counting();
+        var       http     = new RecordingCapacitorHttpClient(handler, AuthStatus.NotAuthenticated);
+
+        var command = new PermissionRequestCommand(
+            Config.Root, Resolutions.At("https://example.test", Config.Root), http);
+
+        var exit = await command.Handle(
+            """{"session_id":"s1","tool_name":"Bash","tool_input":{"command":"ls"}}""",
+            selfHealWatcher: false);
+
+        await Assert.That(exit).IsEqualTo(0);
+        await Assert.That(handler.Requests).IsEqualTo(0);
+        await Assert.That(http.Lanes).IsEquivalentTo(new[] { "ForHookAsync" });
     }
 }

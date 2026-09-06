@@ -5,6 +5,8 @@ using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
 using WireMock.Server;
 
+using Capacitor.Cli.Core.Http;
+
 namespace Capacitor.Cli.Tests.Unit.Commands;
 
 /// <summary>
@@ -23,12 +25,12 @@ public class AgentHookPosterTests : IDisposable {
     [TempConfigRoot] public required TempConfigRoot Config { get; init; }
 
     // The poster targets the resolution's URL, so the stub server's is what the resolution names.
-    AgentHookPoster  Poster => field ??= new(Config.Root, Resolutions.At(_server.Url!, Config.Root));
+    AgentHookPoster  Poster => field ??= new(Config.Root, Resolutions.At(_server.Url!, Config.Root), new FixedCapacitorHttpClient());
 
     public void Dispose() => _server.Stop();
 
-    static Func<Task<(HttpClient, AuthStatus)>> Factory(AuthStatus status)
-        => () => Task.FromResult((new HttpClient(), status));
+    static Func<Task<AuthAttempt>> Factory(AuthStatus status)
+        => () => Task.FromResult(new AuthAttempt(new HttpClient(), status));
 
     [Test]
     public async Task Expired_auth_skips_the_post_and_reports_AuthLapsed() {
@@ -129,9 +131,11 @@ public class AgentHookPosterTests : IDisposable {
     }
 
     [Test]
-    public async Task IsAuthLapsed_is_true_only_for_expired_or_unauthenticated() {
+    public async Task IsAuthLapsed_is_true_for_every_unusable_status() {
         await Assert.That(AgentHookPoster.IsAuthLapsed(AuthStatus.Expired)).IsTrue();
         await Assert.That(AgentHookPoster.IsAuthLapsed(AuthStatus.NotAuthenticated)).IsTrue();
+        await Assert.That(AgentHookPoster.IsAuthLapsed(AuthStatus.WrongServer)).IsTrue();
+        await Assert.That(AgentHookPoster.IsAuthLapsed(AuthStatus.UnusableServerUrl)).IsTrue();
         await Assert.That(AgentHookPoster.IsAuthLapsed(AuthStatus.Ok)).IsFalse();
         await Assert.That(AgentHookPoster.IsAuthLapsed(AuthStatus.NoAuthRequired)).IsFalse();
     }
@@ -141,7 +145,7 @@ public class AgentHookPosterTests : IDisposable {
         using var tmp = new TempDir();
         var spool = new HookSpool(tmp.Path);
         var outcome = await Poster.PostOrSpoolAsync(
-            () => Task.FromResult<(HttpClient, AuthStatus)>((new HttpClient(), AuthStatus.Expired)), "session-start/kiro", """{"session_id":"x"}""",
+            () => Task.FromResult(new AuthAttempt(new HttpClient(), AuthStatus.Expired)), "session-start/kiro", """{"session_id":"x"}""",
             "kiro-hook", spool, sessionId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", route: "session-start/kiro");
 
         await Assert.That(outcome).IsEqualTo(HookPostOutcome.Spooled);
@@ -156,7 +160,7 @@ public class AgentHookPosterTests : IDisposable {
         var spool = new HookSpool(tmp.Path);
         using var handler = new StubHandler(System.Net.HttpStatusCode.Unauthorized);
         var outcome = await Poster.PostOrSpoolAsync(
-            () => Task.FromResult<(HttpClient, AuthStatus)>((new HttpClient(handler), AuthStatus.Ok)), "session-start/kiro", """{"session_id":"x"}""",
+            () => Task.FromResult(new AuthAttempt(new HttpClient(handler), AuthStatus.Ok)), "session-start/kiro", """{"session_id":"x"}""",
             "kiro-hook", spool, sessionId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", route: "session-start/kiro");
 
         await Assert.That(outcome).IsEqualTo(HookPostOutcome.Spooled);
@@ -171,7 +175,7 @@ public class AgentHookPosterTests : IDisposable {
         var spool = new HookSpool(tmp.Path);
         using var handler = new StubHandler(System.Net.HttpStatusCode.BadRequest);
         var outcome = await Poster.PostOrSpoolAsync(
-            () => Task.FromResult<(HttpClient, AuthStatus)>((new HttpClient(handler), AuthStatus.Ok)), "session-start/kiro", """{"session_id":"x"}""",
+            () => Task.FromResult(new AuthAttempt(new HttpClient(handler), AuthStatus.Ok)), "session-start/kiro", """{"session_id":"x"}""",
             "kiro-hook", spool, sessionId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", route: "session-start/kiro");
 
         await Assert.That(outcome).IsEqualTo(HookPostOutcome.Failed);
@@ -188,7 +192,7 @@ public class AgentHookPosterTests : IDisposable {
         using var capture = ConsoleOutput.StartErrorCapture("\n");
 
         await Poster.PostOrSpoolAsync(
-            () => Task.FromResult<(HttpClient, AuthStatus)>((new HttpClient(handler), AuthStatus.Ok)), "stop/codex", """{"session_id":"x"}""",
+            () => Task.FromResult(new AuthAttempt(new HttpClient(handler), AuthStatus.Ok)), "stop/codex", """{"session_id":"x"}""",
             "codex-hook", spool, sessionId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", route: "stop/codex");
 
         await Assert.That(capture.GetCapturedError()).Contains(
@@ -201,7 +205,7 @@ public class AgentHookPosterTests : IDisposable {
         var spool = new HookSpool(tmp.Path);
         using var handler = new StubHandler(System.Net.HttpStatusCode.OK); // 200
         var outcome = await Poster.PostOrSpoolAsync(
-            () => Task.FromResult<(HttpClient, AuthStatus)>((new HttpClient(handler), AuthStatus.Ok)), "session-start/kiro", """{"session_id":"x"}""",
+            () => Task.FromResult(new AuthAttempt(new HttpClient(handler), AuthStatus.Ok, null, null)), "session-start/kiro", """{"session_id":"x"}""",
             "kiro-hook", spool, sessionId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", route: "session-start/kiro");
 
         await Assert.That(outcome).IsEqualTo(HookPostOutcome.Posted);
